@@ -9,12 +9,29 @@
   box-sizing: border-box;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   margin: 0;
   min-width: 320px;
   background: #F7F4EF;
   font-family: "Manrope", ui-sans-serif, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+.landing-page button,
+.landing-page a {
+  -webkit-tap-highlight-color: transparent;
+  transition-property: color, background-color, border-color, box-shadow, opacity, transform, translate, scale;
+  transition-duration: 200ms;
+  transition-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.landing-page button:active:not(:disabled),
+.landing-page a:active {
+  scale: 0.97;
 }
 
 button,
@@ -31,6 +48,22 @@ select {
 ::selection {
   background: #E6E2F2;
   color: #514A78;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .landing-page button,
+  .landing-page a {
+    transition-duration: 0.01ms !important;
+  }
+
+  .landing-page button:active:not(:disabled),
+  .landing-page a:active {
+    scale: 1;
+  }
 }
 
 @media (max-width: 768px) {
