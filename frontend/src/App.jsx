@@ -10,12 +10,14 @@ function Icon({ name, className = "size-5" }) {
     users: <><path d="M16 20v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M17 11a4 4 0 0 0 0-8M22 20v-2a4 4 0 0 0-3-3.87" /></>,
     chart: <><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></>,
     settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 9 19.38a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.62 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15 4.62a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9 1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z" /></>,
+    archive: <><path d="M3 4h18v4H3zM5 8v12h14V8M10 12h4" /></>,
     help: <><circle cx="12" cy="12" r="9" /><path d="M9.7 9a2.5 2.5 0 1 1 3.2 2.4c-.9.35-.9 1.1-.9 1.6M12 17h.01" /></>,
     search: <><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></>,
     eye: <><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></>,
     eyeOff: <><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8" /><path d="M9.9 5.2A10.8 10.8 0 0 1 12 5c6.4 0 10 7 10 7a16.5 16.5 0 0 1-3.1 3.8M6.2 6.2C3.5 8.1 2 12 2 12s3.6 7 10 7a10 10 0 0 0 4-.8" /></>,
     bell: <><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></>,
     plus: <path d="M12 5v14M5 12h14" />,
+    check: <path d="m5 12 4 4L19 6" />,
     arrow: <path d="m9 18 6-6-6-6" />,
     location: <><path d="M20 10c0 5-8 12-8 12S4 15 4 10a8 8 0 1 1 16 0Z" /><circle cx="12" cy="10" r="2.5" /></>,
     clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
@@ -75,12 +77,67 @@ function getTodayDateInputValue() {
   return `${year}-${month}-${day}`;
 }
 
+function getPhilippineDateValue() {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Manila",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const part = (type) => parts.find((item) => item.type === type)?.value || "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function isEventDateToday(event) {
+  const startDate = toDateInputValue(event.date || "");
+  const endDate = event.multipleDay && event.endDate
+    ? toDateInputValue(event.endDate)
+    : startDate;
+  const today = getPhilippineDateValue();
+  return Boolean(startDate && endDate && startDate <= today && today <= endDate);
+}
+
+function getEventStartAt(event) {
+  const date = toDateInputValue(event.date || "");
+  const time = toTimeInputValue(event.time || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return null;
+  const [year, month, day] = date.split("-").map(Number);
+  const [hours, minutes] = time.split(":").map(Number);
+  if (hours > 23 || minutes > 59) return null;
+  return new Date(Date.UTC(year, month - 1, day, hours - 8, minutes));
+}
+
+function getDaysUntilEvent(event, now) {
+  const eventDate = toDateInputValue(event.date || "");
+  const today = getPhilippineDateValue(new Date(now));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(eventDate)) return null;
+  const [eventYear, eventMonth, eventDay] = eventDate.split("-").map(Number);
+  const [todayYear, todayMonth, todayDay] = today.split("-").map(Number);
+  const eventDayUtc = Date.UTC(eventYear, eventMonth - 1, eventDay);
+  const todayDayUtc = Date.UTC(todayYear, todayMonth - 1, todayDay);
+  return Math.round((eventDayUtc - todayDayUtc) / 86400000);
+}
+
 function toTimeInputValue(value) {
   const match = value.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
   if (!match) return /^\d{2}:\d{2}$/.test(value) ? value : "";
   let hours = Number(match[1]) % 12;
   if (match[3].toUpperCase() === "PM") hours += 12;
   return `${String(hours).padStart(2, "0")}:${match[2]}`;
+}
+
+function hasEventEnded(event) {
+  const date = event.multipleDay && event.endDate ? event.endDate : event.date;
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date || "");
+  const timeMatch = /^(\d{2}):(\d{2})$/.exec(toTimeInputValue(event.time || ""));
+  if (!dateMatch || !timeMatch) return false;
+  const [, year, month, day] = dateMatch;
+  const [, hours, minutes] = timeMatch;
+  const dateUtc = Date.UTC(Number(year), Number(month) - 1, Number(day));
+  const parsedDate = new Date(dateUtc);
+  if (parsedDate.toISOString().slice(0, 10) !== date) return false;
+  const eventEnd = dateUtc + (Number(hours) - 8) * 60 * 60 * 1000 + Number(minutes) * 60 * 1000;
+  return Date.now() >= eventEnd;
 }
 
 function DashboardSidebar({ active, setActive, mobileOpen, setMobileOpen, onHome, onHelp, onSettings, orderCount }) {
@@ -124,12 +181,20 @@ function Dashboard({ user, onHome, onSignOut }) {
   const [events, setEvents] = useState([]);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("All events");
-  const [orderEventFilter, setOrderEventFilter] = useState("");
+  const [showArchivedEvents, setShowArchivedEvents] = useState(false);
+  const [orderEventTab, setOrderEventTab] = useState("overview");
+  const [attendeeEventTab, setAttendeeEventTab] = useState("overview");
+  const [hiddenOrderEventCodes, setHiddenOrderEventCodes] = useState([]);
+  const [hiddenAttendeeEventCodes, setHiddenAttendeeEventCodes] = useState([]);
+  const [eventTabSettingsSection, setEventTabSettingsSection] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [utilityModal, setUtilityModal] = useState("");
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
-  const [deleteConfirmEvent, setDeleteConfirmEvent] = useState(null);
-  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [actionConfirmation, setActionConfirmation] = useState(null);
+  const [actionSubmitting, setActionSubmitting] = useState(false);
+  const [attendeeCheckInConfirmation, setAttendeeCheckInConfirmation] = useState(null);
+  const [attendeeCheckInSubmitting, setAttendeeCheckInSubmitting] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
   const [eventFormStep, setEventFormStep] = useState(1);
   const [eventFormBasics, setEventFormBasics] = useState({});
   const [helpSearch, setHelpSearch] = useState("");
@@ -157,8 +222,17 @@ function Dashboard({ user, onHome, onSignOut }) {
   const [notice, setNotice] = useState("");
   const [page, setPage] = useState(1);
   const [analyticsRange, setAnalyticsRange] = useState("30 days");
+  const [analyticsEventTab, setAnalyticsEventTab] = useState("overview");
+  const [hiddenAnalyticsEventCodes, setHiddenAnalyticsEventCodes] = useState([]);
   const [orders, setOrders] = useState([]);
   const [attendees, setAttendees] = useState([]);
+
+  useEffect(() => {
+    const updateCurrentTime = () => setCurrentTime(Date.now());
+    updateCurrentTime();
+    const intervalId = window.setInterval(updateCurrentTime, 60000);
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     let activeRequest = true;
@@ -205,11 +279,14 @@ function Dashboard({ user, onHome, onSignOut }) {
     };
   }, [modalOpen, venueInput, venueSelected]);
 
+  const archiveView = active === "Events" && showArchivedEvents;
   const filtered = useMemo(() => events.filter((event) => {
+    const isArchived = ["Finished", "Cancelled"].includes(event.status);
+    if (isArchived !== archiveView) return false;
     const matchesSearch = event.name.toLowerCase().includes(search.toLowerCase()) || event.venue.toLowerCase().includes(search.toLowerCase());
-    const matchesFilter = filter === "All events" || event.status === filter;
+    const matchesFilter = active === "Overview" || filter === (archiveView ? "All archived" : "All events") || event.status === filter;
     return matchesSearch && matchesFilter;
-  }), [events, search, filter]);
+  }), [events, search, filter, archiveView, active]);
   const totalPages = Math.max(1, Math.ceil(filtered.length / 3));
   const pagedEvents = filtered.slice((page - 1) * 3, page * 3);
   const selectedEvent = events.find((event) => event.id === editingEvent);
@@ -252,16 +329,14 @@ function Dashboard({ user, onHome, onSignOut }) {
         priceCents: Math.round(Number(ticket.price) * 100),
       })) : [],
     };
+    if (editingEvent) {
+      setActionConfirmation({ type: "save", event: selectedEvent, values });
+      return;
+    }
     try {
-      if (editingEvent) {
-        const updated = await api(`/events/${editingEvent}`, { method: "PATCH", body: JSON.stringify(values) });
-        setEvents((current) => current.map((item) => item.id === editingEvent ? updated : item));
-        setNotice("Event details updated.");
-      } else {
-        const created = await api("/events", { method: "POST", body: JSON.stringify(values) });
-        setEvents((current) => [created, ...current]);
-        setNotice("Event created and saved as a draft.");
-      }
+      const created = await api("/events", { method: "POST", body: JSON.stringify(values) });
+      setEvents((current) => [created, ...current]);
+      setNotice("Event created and saved as a draft.");
       setModalOpen(false);
       setEditingEvent(null);
       setEventFormStep(1);
@@ -281,19 +356,37 @@ function Dashboard({ user, onHome, onSignOut }) {
     window.setTimeout(() => setNotice(""), 3200);
   }
 
-  async function removeEvent() {
-    if (!deleteConfirmEvent || deleteSubmitting) return;
-    setDeleteSubmitting(true);
+  async function confirmEventAction() {
+    if (!actionConfirmation || actionSubmitting) return;
+    setActionSubmitting(true);
     try {
-      await api(`/events/${deleteConfirmEvent.id}`, { method: "DELETE" });
-      setEvents((current) => current.filter((event) => event.id !== deleteConfirmEvent.id));
-      setPage(1);
-      setDeleteConfirmEvent(null);
-      setNotice("Event deleted.");
+      const { type, event } = actionConfirmation;
+      if (type === "cancel") {
+        const updated = await api(`/events/${event.id}/cancel`, { method: "PATCH" });
+        setEvents((current) => current.map((item) => item.id === updated.id ? updated : item));
+        setPage(1);
+        setNotice("Event cancelled and moved to the archive.");
+      } else if (type === "finish") {
+        const updated = await api(`/events/${event.id}/finish`, { method: "PATCH" });
+        setEvents((current) => current.map((item) => item.id === updated.id ? updated : item));
+        setNotice("Event marked as finished.");
+      } else if (type === "save") {
+        const updated = await api(`/events/${event.id}`, {
+          method: "PATCH",
+          body: JSON.stringify(actionConfirmation.values),
+        });
+        setEvents((current) => current.map((item) => item.id === updated.id ? updated : item));
+        setModalOpen(false);
+        setEditingEvent(null);
+        setEventFormStep(1);
+        setEventFormBasics({});
+        setNotice("Event details updated.");
+      }
+      setActionConfirmation(null);
     } catch (error) {
       setNotice(error.message);
     } finally {
-      setDeleteSubmitting(false);
+      setActionSubmitting(false);
     }
     window.setTimeout(() => setNotice(""), 3200);
   }
@@ -309,29 +402,41 @@ function Dashboard({ user, onHome, onSignOut }) {
     window.setTimeout(() => setNotice(""), 3200);
   }
 
-  async function refundOrder(order) {
-    try {
-      const updated = await api(`/orders/${order.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ status: "Refunded" }),
-      });
-      setOrders((current) => current.map((item) => item.id === updated.id ? updated : item));
-      setNotice(`${order.number} refunded successfully.`);
-    } catch (error) {
-      setNotice(error.message);
-    }
-    window.setTimeout(() => setNotice(""), 3200);
-  }
-
   async function toggleAttendee(person) {
+    if (!person.checkedIn) {
+      setAttendeeCheckInConfirmation(person);
+      return;
+    }
+
     try {
       const updated = await api(`/attendees/${person.id}`, {
         method: "PATCH",
-        body: JSON.stringify({ checkedIn: !person.checkedIn }),
+        body: JSON.stringify({ checkedIn: false }),
       });
       setAttendees((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setNotice("Check-in undone.");
     } catch (error) {
       setNotice(error.message);
+    } finally {
+      window.setTimeout(() => setNotice(""), 3200);
+    }
+  }
+
+  async function confirmAttendeeCheckIn() {
+    if (!attendeeCheckInConfirmation || attendeeCheckInSubmitting) return;
+    setAttendeeCheckInSubmitting(true);
+    try {
+      const updated = await api(`/attendees/${attendeeCheckInConfirmation.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ checkedIn: true }),
+      });
+      setAttendees((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setAttendeeCheckInConfirmation(null);
+      setNotice("Attendee checked in.");
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setAttendeeCheckInSubmitting(false);
       window.setTimeout(() => setNotice(""), 3200);
     }
   }
@@ -354,14 +459,32 @@ function Dashboard({ user, onHome, onSignOut }) {
   const ticketsSold = events.reduce((sum, event) => sum + event.sold, 0);
   const activeEvents = events.filter((event) => event.status === "On sale").length;
   const draftEvents = events.filter((event) => event.status === "Draft").length;
-  const featuredEvent = events.find((event) => event.status === "On sale") || events[0];
-  const publishedEvents = events.filter((event) => event.status === "On sale" && event.eventCode);
-  const activeOrderEventFilter = publishedEvents.some((event) => event.eventCode === orderEventFilter)
-    ? orderEventFilter
-    : "";
-  const visibleOrders = activeOrderEventFilter
-    ? orders.filter((order) => order.eventCode === activeOrderEventFilter)
+  const featuredEvent = events
+    .filter((event) => event.status === "On sale")
+    .map((event) => ({ event, startsAt: getEventStartAt(event) }))
+    .filter(({ startsAt }) => startsAt && startsAt.getTime() >= currentTime)
+    .sort((first, second) => first.startsAt - second.startsAt)[0]?.event;
+  const daysUntilFeaturedEvent = featuredEvent ? getDaysUntilEvent(featuredEvent, currentTime) : null;
+  const eventTabEvents = events.filter((event) => ["On sale", "Finished", "Cancelled"].includes(event.status) && event.eventCode);
+  const visibleOrderTabs = eventTabEvents.filter((event) => !hiddenOrderEventCodes.includes(event.eventCode));
+  const visibleAttendeeTabs = eventTabEvents.filter((event) => !hiddenAttendeeEventCodes.includes(event.eventCode));
+  const activeOrderEventTab = visibleOrderTabs.some((event) => event.eventCode === orderEventTab) ? orderEventTab : "overview";
+  const activeAttendeeEventTab = visibleAttendeeTabs.some((event) => event.eventCode === attendeeEventTab) ? attendeeEventTab : "overview";
+  const visibleOrders = activeOrderEventTab !== "overview"
+    ? orders.filter((order) => order.eventCode === activeOrderEventTab)
     : orders;
+  const visibleAttendees = activeAttendeeEventTab !== "overview"
+    ? attendees.filter((person) => person.eventCode === activeAttendeeEventTab)
+    : attendees;
+  const analyticsTabEvents = eventTabEvents.filter((event) => !hiddenAnalyticsEventCodes.includes(event.eventCode));
+  const selectedAnalyticsEvent = analyticsTabEvents.find((event) => event.eventCode === analyticsEventTab);
+  const analyticsEvents = selectedAnalyticsEvent ? [selectedAnalyticsEvent] : analyticsTabEvents;
+  const analyticsEventCodes = new Set(analyticsEvents.map((event) => event.eventCode));
+  const analyticsOrders = orders.filter((order) => order.status === "Paid" && analyticsEventCodes.has(order.eventCode));
+  const analyticsAttendees = attendees.filter((person) => analyticsEventCodes.has(person.eventCode));
+  const analyticsTicketsSold = analyticsEvents.reduce((sum, event) => sum + event.sold, 0);
+  const analyticsCapacity = analyticsEvents.reduce((sum, event) => sum + event.total, 0);
+  const analyticsRevenue = analyticsOrders.reduce((sum, order) => sum + Number(String(order.amount).replace(/[^\d.]/g, "")), 0);
   const currency = new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP", maximumFractionDigits: 0 });
 
   return (
@@ -405,9 +528,14 @@ function Dashboard({ user, onHome, onSignOut }) {
               <h1 className="text-3xl font-extrabold tracking-[-.04em] sm:text-4xl">{active === "Overview" ? `Magandang umaga, ${firstName}.` : active}</h1>
               <p className="mt-2 text-sm text-black/45">{active === "Overview" ? "Here’s what’s happening across your events." : `Manage your ${active.toLowerCase()} in one place.`}</p>
             </div>
-            {(active === "Overview" || active === "Events") && <button onClick={() => { setEditingEvent(null); setEventFormStep(1); setEventFormBasics({}); setMultipleDay(false); setPricingMode("free"); setEventPrice(""); setTicketTypes([{ id: "", name: "General Admission", price: "" }, { id: "", name: "VIP", price: "" }]); setEventStartDate(""); setEventEndDate(""); setVenueInput(""); setVenueSelected(false); setVenueSuggestions([]); setVenueSuggestionError(""); setModalOpen(true); }} className="flex h-12 items-center justify-center gap-2 rounded-xl bg-[#756FB8] px-5 text-sm font-bold text-white shadow-[0_10px_30px_rgba(114,87,245,.25)] transition hover:-translate-y-0.5 hover:bg-[#625CA4]">
-              <Icon name="plus" className="size-4" />Create event
-            </button>}
+            {(active === "Overview" || active === "Events") && <div className="flex flex-wrap gap-2">
+              <button onClick={() => { setEditingEvent(null); setEventFormStep(1); setEventFormBasics({}); setMultipleDay(false); setPricingMode("free"); setEventPrice(""); setTicketTypes([{ id: "", name: "General Admission", price: "" }, { id: "", name: "VIP", price: "" }]); setEventStartDate(""); setEventEndDate(""); setVenueInput(""); setVenueSelected(false); setVenueSuggestions([]); setVenueSuggestionError(""); setModalOpen(true); }} className="flex h-12 items-center justify-center gap-2 rounded-xl bg-[#756FB8] px-5 text-sm font-bold text-white shadow-[0_10px_30px_rgba(114,87,245,.25)] transition hover:-translate-y-0.5 hover:bg-[#625CA4]">
+                <Icon name="plus" className="size-4" />Create event
+              </button>
+              {active === "Events" && <button type="button" onClick={() => { setShowArchivedEvents((current) => !current); setFilter(archiveView ? "All events" : "All archived"); setPage(1); }} className="flex h-12 items-center justify-center gap-2 rounded-xl border border-black/[.08] bg-white px-5 text-sm font-bold text-[#2D3142] transition hover:bg-[#F8F6F3]">
+                <Icon name="archive" className="size-4" />{showArchivedEvents ? "Back to events" : "Archive"}
+              </button>}
+            </div>}
           </div>
 
           {active === "Overview" && <><section className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -428,9 +556,9 @@ function Dashboard({ user, onHome, onSignOut }) {
           <section className="mb-6 overflow-hidden rounded-2xl bg-[#333746] text-white">
             <div className="grid md:grid-cols-[1.1fr_.9fr]">
               <div className="flex flex-col justify-center p-7 sm:p-9">
-                <div className="mb-5 flex items-center gap-2"><span className="size-2 animate-pulse rounded-full bg-[#F4DFA6]" /><span className="text-[10px] font-bold uppercase tracking-[.18em] text-white/55">Next up · 5 days</span></div>
-                <h2 className="max-w-lg text-2xl font-extrabold tracking-[-.03em] sm:text-3xl">{featuredEvent?.name || "Create your first event"}</h2>
-                <p className="mt-3 max-w-md text-sm leading-6 text-white/50">{featuredEvent ? `${featuredEvent.date} · ${featuredEvent.venue}` : "Create and manage events from your organizer workspace."}</p>
+                <div className="mb-5 flex items-center gap-2"><span className={`size-2 rounded-full ${featuredEvent ? "animate-pulse bg-[#F4DFA6]" : "bg-white/30"}`} /><span className="text-[10px] font-bold uppercase tracking-[.18em] text-white/55">{featuredEvent ? `Next up · ${daysUntilFeaturedEvent === 0 ? "Today" : daysUntilFeaturedEvent === 1 ? "1 day" : `${daysUntilFeaturedEvent} days`}` : "No upcoming events"}</span></div>
+                <h2 className="max-w-lg text-2xl font-extrabold tracking-[-.03em] sm:text-3xl">{featuredEvent?.name || (events.length ? "You're all caught up" : "Create your first event")}</h2>
+                <p className="mt-3 max-w-md text-sm leading-6 text-white/50">{featuredEvent ? `${featuredEvent.date} · ${featuredEvent.venue}` : events.length ? "There are no upcoming published events. Publish an event to see it here." : "Create and manage events from your organizer workspace."}</p>
                 <div className="mt-6 flex flex-wrap gap-5 text-xs font-semibold text-white/70">
                   {featuredEvent && <><span className="flex items-center gap-2"><Icon name="calendar" className="size-4 text-[#C4BEE5]" />{featuredEvent.date}</span>
                   <span className="flex items-center gap-2"><Icon name="location" className="size-4 text-[#C4BEE5]" />{featuredEvent.venue}</span></>}
@@ -449,20 +577,15 @@ function Dashboard({ user, onHome, onSignOut }) {
           </section></>}
 
           {active === "Orders" && <section className="overflow-hidden rounded-2xl border border-black/[.055] bg-white">
-            <div className="flex flex-col gap-4 border-b border-black/[.06] p-6 sm:flex-row sm:items-end sm:justify-between">
-              <div><h2 className="text-lg font-extrabold">Recent orders</h2><p className="mt-1 text-xs text-black/40">Review payments and process refunds.</p></div>
-              {publishedEvents.length > 0 && <label className="flex items-center gap-2 text-xs font-semibold text-black/50">
-                <span>Filter</span>
-                <select
-                  aria-label="Filter orders by published event"
-                  value={activeOrderEventFilter}
-                  onChange={(event) => setOrderEventFilter(event.target.value)}
-                  className="h-10 max-w-[240px] rounded-xl border border-black/[.08] bg-white px-3 text-xs font-semibold text-[#2D3142] outline-none focus:border-[#756FB8]"
-                >
-                  <option value="">All published events</option>
-                  {publishedEvents.map((event) => <option key={event.eventCode} value={event.eventCode}>{event.name}</option>)}
-                </select>
-              </label>}
+            <div className="border-b border-black/[.06] p-6">
+              <div className="flex items-center gap-2 border-b border-black/[.08]">
+                <div role="tablist" aria-label="Filter orders by event" className="flex min-w-0 flex-1 gap-2 overflow-x-auto">
+                  <button type="button" role="tab" aria-selected={activeOrderEventTab === "overview"} onClick={() => setOrderEventTab("overview")} className={`shrink-0 border-b-2 px-4 py-3 text-xs font-bold transition ${activeOrderEventTab === "overview" ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>Overview</button>
+                  {visibleOrderTabs.map((event) => <button key={event.eventCode} type="button" role="tab" aria-selected={activeOrderEventTab === event.eventCode} onClick={() => setOrderEventTab(event.eventCode)} className={`max-w-56 shrink-0 truncate border-b-2 px-4 py-3 text-xs font-bold transition ${activeOrderEventTab === event.eventCode ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>{event.name}</button>)}
+                </div>
+                <button type="button" aria-label="Choose events shown in order tabs" title="Configure event tabs" onClick={() => setEventTabSettingsSection("orders")} className="grid size-9 shrink-0 place-items-center rounded-xl text-black/45 transition hover:bg-[#F8F6F3] hover:text-[#756FB8]"><Icon name="settings" className="size-5" /></button>
+              </div>
+              <div className="mt-4"><h2 className="text-lg font-extrabold">Recent orders</h2><p className="mt-1 text-xs text-black/40">Review payments and process refunds{activeOrderEventTab !== "overview" ? ` · ${visibleOrderTabs.find((event) => event.eventCode === activeOrderEventTab)?.name || ""}` : ""}.</p></div>
             </div>
             <div className="divide-y divide-black/[.05]">
               {visibleOrders.map((order) => <div key={order.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:px-6">
@@ -470,37 +593,110 @@ function Dashboard({ user, onHome, onSignOut }) {
                 <div className="min-w-0 flex-1"><p className="text-sm font-bold">{order.buyer}</p><p className="mt-1 truncate text-[11px] text-black/40">{order.number} · {order.event}</p></div>
                 <p className="text-sm font-extrabold">{order.amount}</p>
                 <span className={`w-fit rounded-full px-2.5 py-1 text-[10px] font-bold ${order.status === "Paid" ? "bg-emerald-50 text-emerald-700" : "bg-[#F2DDD5] text-[#9b5f50]"}`}>{order.status}</span>
-                <button disabled={order.status !== "Paid" || Boolean(order.checkoutSessionId)} title={order.checkoutSessionId ? "Process PayMongo refunds through the PayMongo dashboard." : undefined} onClick={() => refundOrder(order)} className="rounded-xl border border-black/10 px-3 py-2 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-35">{order.checkoutSessionId ? "PayMongo refund" : "Refund"}</button>
               </div>)}
-              {visibleOrders.length === 0 && <p className="p-6 text-sm text-black/45">{activeOrderEventFilter ? "No orders for this event yet." : "No orders yet."}</p>}
+              {visibleOrders.length === 0 && <p className="p-6 text-sm text-black/45">{activeOrderEventTab !== "overview" ? "No orders for this event yet." : "No orders yet."}</p>}
             </div>
           </section>}
 
           {active === "Attendees" && <section className="overflow-hidden rounded-2xl border border-black/[.055] bg-white">
-            <div className="border-b border-black/[.06] p-6"><h2 className="text-lg font-extrabold">Attendee check-in</h2><p className="mt-1 text-xs text-black/40">{attendees.filter((person) => person.checkedIn).length} of {attendees.length} guests checked in.</p></div>
+            <div className="border-b border-black/[.06] p-6">
+              <div className="flex items-center gap-2 border-b border-black/[.08]">
+                <div role="tablist" aria-label="Filter attendees by event" className="flex min-w-0 flex-1 gap-2 overflow-x-auto">
+                  <button type="button" role="tab" aria-selected={activeAttendeeEventTab === "overview"} onClick={() => setAttendeeEventTab("overview")} className={`shrink-0 border-b-2 px-4 py-3 text-xs font-bold transition ${activeAttendeeEventTab === "overview" ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>Overview</button>
+                  {visibleAttendeeTabs.map((event) => <button key={event.eventCode} type="button" role="tab" aria-selected={activeAttendeeEventTab === event.eventCode} onClick={() => setAttendeeEventTab(event.eventCode)} className={`max-w-56 shrink-0 truncate border-b-2 px-4 py-3 text-xs font-bold transition ${activeAttendeeEventTab === event.eventCode ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>{event.name}</button>)}
+                </div>
+                <button type="button" aria-label="Choose events shown in attendee tabs" title="Configure event tabs" onClick={() => setEventTabSettingsSection("attendees")} className="grid size-9 shrink-0 place-items-center rounded-xl text-black/45 transition hover:bg-[#F8F6F3] hover:text-[#756FB8]"><Icon name="settings" className="size-5" /></button>
+              </div>
+              <div className="mt-4"><h2 className="text-lg font-extrabold">Attendee check-in</h2><p className="mt-1 text-xs text-black/40">{visibleAttendees.filter((person) => person.checkedIn).length} of {visibleAttendees.length} guests checked in{activeAttendeeEventTab !== "overview" ? ` · ${visibleAttendeeTabs.find((event) => event.eventCode === activeAttendeeEventTab)?.name || ""}` : ""}.</p></div>
+            </div>
             <div className="divide-y divide-black/[.05]">
-              {attendees.map((person) => <div key={person.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:px-6">
-                <div className="grid size-10 shrink-0 place-items-center rounded-full bg-[#DFE7F2] text-xs font-extrabold text-[#6689A3]">{person.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</div>
-                <div className="min-w-0 flex-1"><p className="text-sm font-bold">{person.name}</p><p className="mt-1 truncate text-[11px] text-black/40">{person.ticket} · {person.event}</p></div>
-                <button onClick={() => toggleAttendee(person)} className={`rounded-xl px-4 py-2.5 text-xs font-bold ${person.checkedIn ? "bg-[#E0EADD] text-[#597450]" : "bg-[#756FB8] text-white"}`}>{person.checkedIn ? "Checked in" : "Check in"}</button>
-              </div>)}
+              {visibleAttendees.map((person) => {
+                const attendeeEvent = events.find((event) => event.eventCode === person.eventCode || event.id === person.eventId);
+                const canCheckInToday = attendeeEvent
+                  ? isEventDateToday(attendeeEvent)
+                  : isEventDateToday({ date: person.date, endDate: person.endDate, multipleDay: Boolean(person.endDate) });
+                return <div key={person.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:px-6">
+                  <div className="grid size-10 shrink-0 place-items-center rounded-full bg-[#DFE7F2] text-xs font-extrabold text-[#6689A3]">{person.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</div>
+                  <div className="min-w-0 flex-1"><p className="text-sm font-bold">{person.name}</p><p className="mt-1 truncate text-[11px] text-black/40">{person.ticket} · {person.event}</p></div>
+                  <div className="flex flex-col items-start gap-1 sm:items-end">
+                    <button
+                      onClick={() => toggleAttendee(person)}
+                      disabled={!person.checkedIn && !canCheckInToday}
+                      title={!person.checkedIn && !canCheckInToday ? "Check-in is available only on the event date." : ""}
+                      className={`rounded-xl px-4 py-2.5 text-xs font-bold disabled:cursor-not-allowed disabled:opacity-40 ${person.checkedIn ? "bg-[#E0EADD] text-[#597450]" : "bg-[#756FB8] text-white"}`}
+                    >
+                      {person.checkedIn ? "Checked in" : "Check in"}
+                    </button>
+                    {!person.checkedIn && !canCheckInToday && <span className="text-[10px] text-black/40">Available on event date</span>}
+                  </div>
+                </div>;
+              })}
+              {visibleAttendees.length === 0 && <p className="p-6 text-sm text-black/45">{activeAttendeeEventTab !== "overview" ? "No attendees for this event yet." : "No attendees yet."}</p>}
             </div>
           </section>}
 
           {active === "Analytics" && <section className="rounded-2xl border border-black/[.055] bg-white p-6 sm:p-8">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-extrabold">Ticket performance</h2><p className="mt-1 text-xs text-black/40">Sales performance across Philippine events.</p></div><select value={analyticsRange} onChange={(e) => setAnalyticsRange(e.target.value)} className="h-10 rounded-xl border border-black/10 bg-white px-3 text-xs font-bold"><option>7 days</option><option>30 days</option><option>12 months</option></select></div>
-            <div className="mt-8 space-y-6">
-              {events.map((event) => { const percent = Math.round((event.sold / event.total) * 100); return <div key={event.id}><div className="mb-2 flex items-center justify-between gap-4"><p className="truncate text-xs font-bold">{event.name}</p><p className="shrink-0 text-xs font-extrabold text-[#756FB8]">{percent}%</p></div><div className="h-3 overflow-hidden rounded-full bg-black/[.05]"><div className="h-full rounded-full bg-[#756FB8] transition-all" style={{ width: `${percent}%` }} /></div></div>; })}
+            <div className="flex items-center gap-2 border-b border-black/[.07]">
+              <div role="tablist" aria-label="Choose event analytics" className="flex min-w-0 flex-1 gap-2 overflow-x-auto">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={!selectedAnalyticsEvent}
+                onClick={() => setAnalyticsEventTab("overview")}
+                className={`shrink-0 border-b-2 px-4 py-3 text-xs font-bold transition ${!selectedAnalyticsEvent ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}
+              >
+                Overview
+              </button>
+              {analyticsTabEvents.map((event) => <button
+                key={event.eventCode}
+                type="button"
+                role="tab"
+                aria-selected={selectedAnalyticsEvent?.eventCode === event.eventCode}
+                onClick={() => setAnalyticsEventTab(event.eventCode)}
+                className={`max-w-56 shrink-0 truncate border-b-2 px-4 py-3 text-xs font-bold transition ${selectedAnalyticsEvent?.eventCode === event.eventCode ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}
+              >
+                {event.name}
+              </button>)}
+              </div>
+              <button
+                type="button"
+                aria-label="Choose events shown in analytics tabs"
+                title="Configure event tabs"
+                onClick={() => setEventTabSettingsSection("analytics")}
+                className="grid size-9 shrink-0 place-items-center rounded-xl text-black/45 transition hover:bg-[#F8F6F3] hover:text-[#756FB8]"
+              >
+                <Icon name="settings" className="size-5" />
+              </button>
             </div>
-            <div className="mt-8 rounded-2xl bg-[#F8F6F3] p-5 text-xs leading-5 text-black/55">Showing the last {analyticsRange}. Manila Creatives Summit currently has the strongest ticket velocity.</div>
+            <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-extrabold">Ticket performance</h2><p className="mt-1 text-xs text-black/40">{selectedAnalyticsEvent ? `Performance for ${selectedAnalyticsEvent.name}.` : "Performance across your published events."}</p></div><select value={analyticsRange} onChange={(e) => setAnalyticsRange(e.target.value)} className="h-10 rounded-xl border border-black/10 bg-white px-3 text-xs font-bold"><option>7 days</option><option>30 days</option><option>12 months</option></select></div>
+            <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {[
+                ["Tickets sold", `${analyticsTicketsSold.toLocaleString("en-PH")} / ${analyticsCapacity.toLocaleString("en-PH")}`],
+                ["Attendees", analyticsAttendees.length.toLocaleString("en-PH")],
+                ["Checked in", analyticsAttendees.filter((person) => person.checkedIn).length.toLocaleString("en-PH")],
+                ["Paid revenue", currency.format(analyticsRevenue)],
+              ].map(([label, value]) => <div key={label} className="rounded-xl bg-[#F8F6F3] p-4">
+                <p className="text-[11px] font-semibold text-black/40">{label}</p>
+                <p className="mt-2 text-lg font-extrabold">{value}</p>
+              </div>)}
+            </div>
+            <div className="mt-8 space-y-6">
+              {analyticsEvents.map((event) => { const percent = event.total > 0 ? Math.round((event.sold / event.total) * 100) : 0; return <div key={event.id}><div className="mb-2 flex items-center justify-between gap-4"><p className="truncate text-xs font-bold">{event.name}</p><p className="shrink-0 text-xs font-extrabold text-[#756FB8]">{percent}% · {event.sold}/{event.total}</p></div><div className="h-3 overflow-hidden rounded-full bg-black/[.05]"><div className="h-full rounded-full bg-[#756FB8] transition-all" style={{ width: `${Math.min(percent, 100)}%` }} /></div></div>; })}
+            </div>
+            {analyticsTabEvents.length === 0 && <p className="mt-6 rounded-xl bg-[#F8F6F3] p-5 text-sm text-black/45">Publish an event to see its analytics here.</p>}
+            {analyticsTabEvents.length > 0 && <div className="mt-8 rounded-2xl bg-[#F8F6F3] p-5 text-xs leading-5 text-black/55">Showing ticket performance for {selectedAnalyticsEvent ? selectedAnalyticsEvent.name : `${analyticsTabEvents.length} published event${analyticsTabEvents.length === 1 ? "" : "s"}`} · {analyticsRange}.</div>}
           </section>}
 
           {(active === "Overview" || active === "Events") && <section className="rounded-2xl border border-black/[.055] bg-white shadow-[0_2px_10px_rgba(20,18,26,.025)]">
             <div className="flex flex-col gap-4 border-b border-black/[.06] p-5 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-              <div><h2 className="text-lg font-extrabold tracking-tight">Your events</h2><p className="mt-1 text-xs text-black/40">Manage your upcoming schedule</p></div>
+              <div><h2 className="text-lg font-extrabold tracking-tight">{archiveView ? "Event archive" : "Your events"}</h2><p className="mt-1 text-xs text-black/40">{archiveView ? "Completed, finished, and cancelled events" : "Manage your upcoming schedule"}</p></div>
               <div className="flex gap-2">
                 <div className="relative flex-1 sm:hidden"><Icon name="search" className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-black/35" /><input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} className="h-10 w-full rounded-xl border border-black/10 pl-9 pr-3 text-xs outline-none" placeholder="Search" /></div>
-                <select value={filter} onChange={(e) => { setFilter(e.target.value); setPage(1); }} className="h-10 rounded-xl border border-black/[.08] bg-white px-3 text-xs font-semibold outline-none"><option>All events</option><option>On sale</option><option>Draft</option></select>
+                <select value={archiveView ? filter : filter === "All archived" ? "All events" : filter} onChange={(e) => { setFilter(e.target.value); setPage(1); }} className="h-10 rounded-xl border border-black/[.08] bg-white px-3 text-xs font-semibold outline-none">
+                  {archiveView
+                    ? <><option>All archived</option><option>Finished</option><option>Cancelled</option></>
+                    : <><option>All events</option><option>On sale</option><option>Draft</option></>}
+                </select>
               </div>
             </div>
             <div className="overflow-x-auto">
@@ -515,12 +711,19 @@ function Dashboard({ user, onHome, onSignOut }) {
                       <td className="px-4 py-4"><p className="text-xs font-semibold">{event.multipleDay && event.endDate ? `${event.date} - ${event.endDate}` : event.date}</p><p className="mt-1 text-[11px] text-black/40">{event.time}</p></td>
                       <td className="px-4 py-4"><div className="flex items-center gap-3"><div className="h-1.5 w-20 overflow-hidden rounded-full bg-black/[.06]"><div className="h-full rounded-full bg-[#756FB8]" style={{ width: `${Math.min((event.sold / event.total) * 100, 100)}%` }} /></div><span className="text-[11px] font-semibold text-black/50">{event.sold}/{event.total}</span></div></td>
                       <td className="px-4 py-4"><span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold ${event.status === "On sale" ? "bg-emerald-50 text-emerald-700" : "bg-black/[.05] text-black/45"}`}><span className={`size-1.5 rounded-full ${event.status === "On sale" ? "bg-emerald-500" : "bg-black/30"}`} />{event.status}</span></td>
-                      <td className="px-6 py-4"><div className="flex justify-center gap-1">{event.status === "Draft" && <button onClick={() => publishEvent(event)} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50">Publish</button>}{event.status === "On sale" && event.eventCode && <button onClick={async () => { try { await navigator.clipboard.writeText(`${window.location.origin}/events/${event.eventCode}`); setNotice("Public event link copied."); } catch { setNotice("Unable to copy the event link. Open the event page and copy its URL."); } window.setTimeout(() => setNotice(""), 3200); }} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50">Copy link</button>}<button onClick={() => { setEditingEvent(event.id); setEventFormStep(1); setEventFormBasics({}); setMultipleDay(event.multipleDay === true); setPricingMode(event.pricingMode || "free"); setEventPrice(event.priceCents ? (event.priceCents / 100).toFixed(2) : ""); setTicketTypes(event.ticketTypes?.length ? event.ticketTypes.map((ticket) => ({ id: ticket.id, name: ticket.name, price: (ticket.priceCents / 100).toFixed(2) })) : [{ id: "", name: "General Admission", price: "" }, { id: "", name: "VIP", price: "" }]); setEventStartDate(toDateInputValue(event.date)); setEventEndDate(event.endDate || ""); setVenueInput(event.venue); setVenueSelected(true); setVenueSuggestions([]); setVenueSuggestionError(""); setModalOpen(true); }} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-[#756FB8] hover:bg-[#E7E6F2]">Edit</button><button onClick={() => setDeleteConfirmEvent(event)} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-rose-600 hover:bg-rose-50">Delete</button></div></td>
+                      <td className="px-6 py-4"><div className="flex justify-center gap-1">
+                        {!archiveView && event.status === "Draft" && <button onClick={() => publishEvent(event)} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50">Publish</button>}
+                        {event.status === "On sale" && event.eventCode && <button onClick={async () => { try { await navigator.clipboard.writeText(`${window.location.origin}/events/${event.eventCode}`); setNotice("Public event link copied."); } catch { setNotice("Unable to copy the event link. Open the event page and copy its URL."); } window.setTimeout(() => setNotice(""), 3200); }} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50">Copy link</button>}
+                        {!archiveView && <button onClick={() => { setEditingEvent(event.id); setEventFormStep(1); setEventFormBasics({}); setMultipleDay(event.multipleDay === true); setPricingMode(event.pricingMode || "free"); setEventPrice(event.priceCents ? (event.priceCents / 100).toFixed(2) : ""); setTicketTypes(event.ticketTypes?.length ? event.ticketTypes.map((ticket) => ({ id: ticket.id, name: ticket.name, price: (ticket.priceCents / 100).toFixed(2) })) : [{ id: "", name: "General Admission", price: "" }, { id: "", name: "VIP", price: "" }]); setEventStartDate(toDateInputValue(event.date)); setEventEndDate(event.endDate || ""); setVenueInput(event.venue); setVenueSelected(true); setVenueSuggestions([]); setVenueSuggestionError(""); setModalOpen(true); }} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-[#756FB8] hover:bg-[#E7E6F2]">Edit</button>}
+                        {event.status === "On sale" && <button disabled={!hasEventEnded(event)} title={hasEventEnded(event) ? "Mark this event as finished" : "Available after the event end date and time"} onClick={() => setActionConfirmation({ type: "finish", event })} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40">Finish</button>}
+                        {!archiveView && <button onClick={() => setActionConfirmation({ type: "cancel", event })} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-rose-600 hover:bg-rose-50">Cancel</button>}
+                        {archiveView && <span className="px-2.5 py-2 text-[10px] font-semibold text-black/35">Archived</span>}
+                      </div></td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {filtered.length === 0 && <div className="py-14 text-center"><p className="font-bold">No events found</p><p className="mt-1 text-xs text-black/40">Try another search or filter.</p></div>}
+              {filtered.length === 0 && <div className="py-14 text-center"><p className="font-bold">{archiveView ? "No archived events yet" : "No events found"}</p><p className="mt-1 text-xs text-black/40">{archiveView ? "Finished and cancelled events will appear here." : "Try another search or filter."}</p></div>}
             </div>
             <div className="flex items-center justify-between border-t border-black/[.05] px-6 py-4"><p className="text-[11px] text-black/40">Showing {filtered.length ? (page - 1) * 3 + 1 : 0}–{Math.min(page * 3, filtered.length)} of {filtered.length} events</p><div className="flex gap-1"><button disabled={page === 1} onClick={() => setPage((current) => Math.max(1, current - 1))} className="grid size-8 place-items-center rounded-lg border border-black/[.07] text-black/50 disabled:opacity-25"><Icon name="arrow" className="size-3 rotate-180" /></button><button className="grid size-8 place-items-center rounded-lg bg-[#756FB8] text-[11px] font-bold text-white">{page}</button><button disabled={page === totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))} className="grid size-8 place-items-center rounded-lg border border-black/[.07] text-black/50 disabled:opacity-25"><Icon name="arrow" className="size-3" /></button></div></div>
           </section>}
@@ -740,40 +943,153 @@ function Dashboard({ user, onHome, onSignOut }) {
           </section>
         </div>
       )}
-      {deleteConfirmEvent && (
+      {attendeeCheckInConfirmation && (
         <div
           className="fixed inset-0 z-[70] grid place-items-center bg-[#2D3142]/65 p-4 backdrop-blur-sm"
-          onMouseDown={(event) => event.target === event.currentTarget && !deleteSubmitting && setDeleteConfirmEvent(null)}
-          onKeyDown={(event) => event.key === "Escape" && !deleteSubmitting && setDeleteConfirmEvent(null)}
+          onMouseDown={(event) => event.target === event.currentTarget && !attendeeCheckInSubmitting && setAttendeeCheckInConfirmation(null)}
+          onKeyDown={(event) => event.key === "Escape" && !attendeeCheckInSubmitting && setAttendeeCheckInConfirmation(null)}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="attendee-check-in-title"
+            aria-describedby="attendee-check-in-description"
+            className="w-full max-w-sm rounded-3xl bg-white p-7 shadow-2xl"
+          >
+            <div className="grid size-12 place-items-center rounded-2xl bg-[#E0EADD] text-[#597450]">
+              <Icon name="check" />
+            </div>
+            <h2 id="attendee-check-in-title" className="mt-5 text-xl font-extrabold">Confirm attendee check-in?</h2>
+            <p id="attendee-check-in-description" className="mt-2 text-sm leading-6 text-black/50">
+              Check in <span className="font-bold text-[#2D3142]">{attendeeCheckInConfirmation.name}</span> for {attendeeCheckInConfirmation.event}?
+            </p>
+            <div className="mt-7 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setAttendeeCheckInConfirmation(null)}
+                disabled={attendeeCheckInSubmitting}
+                className="rounded-xl border border-black/10 px-4 py-3 text-sm font-bold text-black/60 transition hover:bg-black/[.03] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmAttendeeCheckIn}
+                disabled={attendeeCheckInSubmitting}
+                className="rounded-xl bg-[#756FB8] px-4 py-3 text-sm font-bold text-white transition hover:bg-[#625CA4] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {attendeeCheckInSubmitting ? "Checking in..." : "Confirm check-in"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {actionConfirmation && (
+        <div
+          className="fixed inset-0 z-[70] grid place-items-center bg-[#2D3142]/65 p-4 backdrop-blur-sm"
+          onMouseDown={(event) => event.target === event.currentTarget && !actionSubmitting && setActionConfirmation(null)}
+          onKeyDown={(event) => event.key === "Escape" && !actionSubmitting && setActionConfirmation(null)}
         >
           <section
             role="alertdialog"
             aria-modal="true"
-            aria-labelledby="delete-event-title"
-            aria-describedby="delete-event-description"
+            aria-labelledby="event-action-title"
+            aria-describedby="event-action-description"
             className="w-full max-w-sm rounded-3xl bg-white p-7 shadow-2xl"
           >
-            <div className="grid size-12 place-items-center rounded-2xl bg-rose-50 text-rose-600">
+            <div className={`grid size-12 place-items-center rounded-2xl ${actionConfirmation.type === "cancel" ? "bg-rose-50 text-rose-600" : "bg-[#E7E6F2] text-[#756FB8]"}`}>
               <Icon name="close" />
             </div>
-            <h2 id="delete-event-title" className="mt-5 text-xl font-extrabold">Delete this event?</h2>
-            <p id="delete-event-description" className="mt-2 text-sm leading-6 text-black/50">
-              “{deleteConfirmEvent.name}” will be permanently deleted. This action cannot be undone.
+            <h2 id="event-action-title" className="mt-5 text-xl font-extrabold">
+              {actionConfirmation.type === "cancel" ? "Cancel this event?" : actionConfirmation.type === "finish" ? "Finish this event?" : "Save event changes?"}
+            </h2>
+            <p id="event-action-description" className="mt-2 text-sm leading-6 text-black/50">
+              {actionConfirmation.type === "cancel"
+                ? `Cancel “${actionConfirmation.event.name}”? It will be removed from public registration and moved to the archive. Existing orders and attendee records will be kept.`
+                : actionConfirmation.type === "finish"
+                  ? `Mark “${actionConfirmation.event.name}” as finished? Its public registration page will no longer be available.`
+                  : `Save your changes to “${actionConfirmation.event.name}”?`}
             </p>
             <div className="mt-7 flex justify-end gap-3">
               <button
-                onClick={() => setDeleteConfirmEvent(null)}
-                disabled={deleteSubmitting}
+                onClick={() => setActionConfirmation(null)}
+                disabled={actionSubmitting}
                 className="rounded-xl border border-black/10 px-4 py-3 text-sm font-bold text-black/55 transition hover:bg-black/[.03] disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
-                onClick={removeEvent}
-                disabled={deleteSubmitting}
-                className="rounded-xl bg-rose-600 px-4 py-3 text-sm font-bold text-white transition hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={confirmEventAction}
+                disabled={actionSubmitting}
+                className={`rounded-xl px-4 py-3 text-sm font-bold text-white transition disabled:cursor-not-allowed disabled:opacity-50 ${actionConfirmation.type === "cancel" ? "bg-rose-600 hover:bg-rose-700" : "bg-[#756FB8] hover:bg-[#625CA4]"}`}
               >
-                {deleteSubmitting ? "Deleting..." : "Delete event"}
+                {actionSubmitting
+                  ? actionConfirmation.type === "cancel" ? "Cancelling..." : actionConfirmation.type === "finish" ? "Finishing..." : "Saving..."
+                  : actionConfirmation.type === "cancel" ? "Cancel event" : actionConfirmation.type === "finish" ? "Finish event" : "Save changes"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {eventTabSettingsSection && (
+        <div
+          className="fixed inset-0 z-[70] grid place-items-center bg-[#2D3142]/65 p-4 backdrop-blur-sm"
+          onMouseDown={(event) => event.target === event.currentTarget && setEventTabSettingsSection("")}
+          onKeyDown={(event) => event.key === "Escape" && setEventTabSettingsSection("")}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="event-tab-settings-title"
+            className="w-full max-w-md rounded-3xl bg-white p-7 shadow-2xl"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[.15em] text-[#756FB8]">{eventTabSettingsSection === "analytics" ? "Analytics tabs" : eventTabSettingsSection === "orders" ? "Orders tabs" : "Attendee tabs"}</p>
+                <h2 id="event-tab-settings-title" className="mt-2 text-xl font-extrabold">Choose events to show</h2>
+                <p className="mt-2 text-sm leading-6 text-black/50">Select which events appear as tabs in {eventTabSettingsSection === "analytics" ? "Analytics" : eventTabSettingsSection === "orders" ? "Orders" : "Attendees"}.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEventTabSettingsSection("")}
+                aria-label="Close event tab settings"
+                className="rounded-xl bg-black/[.04] p-2 text-black/50 transition hover:bg-black/[.08]"
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+            {eventTabEvents.length > 0
+              ? <div className="mt-6 max-h-72 space-y-2 overflow-y-auto">
+                {eventTabEvents.map((event) => {
+                  const hiddenEventCodes = eventTabSettingsSection === "analytics"
+                    ? hiddenAnalyticsEventCodes
+                    : eventTabSettingsSection === "orders" ? hiddenOrderEventCodes : hiddenAttendeeEventCodes;
+                  const setHiddenEventCodes = eventTabSettingsSection === "analytics"
+                    ? setHiddenAnalyticsEventCodes
+                    : eventTabSettingsSection === "orders" ? setHiddenOrderEventCodes : setHiddenAttendeeEventCodes;
+                  const isVisible = !hiddenEventCodes.includes(event.eventCode);
+                  return <label key={event.eventCode} className="flex cursor-pointer items-center gap-3 rounded-xl border border-black/[.06] px-4 py-3 transition hover:bg-[#F8F6F3]">
+                    <input
+                      type="checkbox"
+                      checked={isVisible}
+                      onChange={() => setHiddenEventCodes((current) => isVisible
+                        ? [...current, event.eventCode]
+                        : current.filter((eventCode) => eventCode !== event.eventCode))}
+                      className="size-4 accent-[#756FB8]"
+                    />
+                    <span className="min-w-0 flex-1 truncate text-sm font-semibold">{event.name}</span>
+                    {event.status === "Finished" && <span className="text-[10px] font-bold uppercase text-black/35">Finished</span>}
+                  </label>;
+                })}
+              </div>
+              : <p className="mt-6 rounded-xl bg-[#F8F6F3] p-4 text-sm text-black/45">Publish an event to configure event tabs.</p>}
+            <div className="mt-7 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setEventTabSettingsSection("")}
+                className="rounded-xl bg-[#756FB8] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#625CA4]"
+              >
+                Done
               </button>
             </div>
           </section>

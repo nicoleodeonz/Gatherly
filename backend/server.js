@@ -22,7 +22,6 @@ const emailJsPrivateKey = process.env.EMAILJS_PRIVATE_KEY;
 const emailJsTicketTemplateId = process.env.EMAILJS_TICKET_TEMPLATE_ID || "template_3lusa0s";
 const geoapifyApiKey = process.env.GEOAPIFY_API_KEY;
 const payMongoSecretKey = process.env.PAYMONGO_SECRET_KEY;
-const payMongoWebhookSecret = process.env.PAYMONGO_WEBHOOK_SECRET;
 const publicAppUrl = process.env.PUBLIC_APP_URL || "http://127.0.0.1:5173";
 const emailJsTemplateId = "template_gyx5ecm";
 const verificationLifetimeMs = 10 * 60 * 1000;
@@ -112,12 +111,7 @@ function getDatabase() {
   return databasePromise;
 }
 
-app.use(express.json({
-  limit: "32kb",
-  verify: (req, res, buffer) => {
-    req.rawBody = Buffer.from(buffer);
-  },
-}));
+app.use(express.json({ limit: "32kb" }));
 app.use(cookieParser());
 app.use(async (req, res, next) => {
   try {
@@ -219,6 +213,38 @@ function isValidIsoDate(value) {
   }
   const date = new Date(`${value}T00:00:00.000Z`);
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function isEventDateToday(event) {
+  const todayParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Manila",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const part = (type) => todayParts.find((item) => item.type === type)?.value || "";
+  const today = `${part("year")}-${part("month")}-${part("day")}`;
+  const startDate = event.date;
+  const endDate = event.multipleDay && event.endDate ? event.endDate : startDate;
+  return isValidIsoDate(startDate)
+    && isValidIsoDate(endDate)
+    && startDate <= today
+    && today <= endDate;
+}
+
+function getEventEndAt(event) {
+  const date = event.multipleDay && event.endDate ? event.endDate : event.date;
+  const timeMatch = /^(\d{2}):(\d{2})$/.exec(event.time || "");
+  if (!isValidIsoDate(date) || !timeMatch) {
+    return null;
+  }
+  const hours = Number(timeMatch[1]);
+  const minutes = Number(timeMatch[2]);
+  if (hours > 23 || minutes > 59) {
+    return null;
+  }
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day, hours - 8, minutes));
 }
 
 function validateEvent(body) {
@@ -759,9 +785,7 @@ async function fulfillPaidOrder(database, sessionData) {
       if (!registration || registration.status !== "Pending") {
         return;
       }
-      const paidAmount = Number.isInteger(paymentAttributes.net_amount)
-        ? paymentAttributes.net_amount
-        : paymentAttributes.amount;
+      const paidAmount = paymentAttributes.amount;
       if (paidAmount !== registration.amountCents
         || paymentAttributes.currency?.toUpperCase() !== "PHP") {
         throw new Error("PAYMENT_AMOUNT_MISMATCH");
@@ -1210,7 +1234,7 @@ app.get("/api/public/orders/:orderNumber/status", async (req, res) => {
   if (registration.status === "Pending" && registration.checkoutSessionId && payMongoSecretKey?.startsWith("sk_test_")) {
     let response;
     try {
-      response = await fetch(`https://api.paymongo.com/v2/checkout_sessions/${encodeURIComponent(registration.checkoutSessionId)}`, {
+      response = await fetch(`https://api.paymongo.com/v1/checkout_sessions/${encodeURIComponent(registration.checkoutSessionId)}`, {
         headers: { Authorization: `Basic ${Buffer.from(`${payMongoSecretKey}:`).toString("base64")}` },
         signal: AbortSignal.timeout(10000),
       });
@@ -1223,7 +1247,17 @@ app.get("/api/public/orders/:orderNumber/status", async (req, res) => {
       return res.status(502).json({ error: "Payment confirmation is temporarily unavailable. Please refresh shortly." });
     }
     const checkoutSession = (await response.json()).data;
-    await fulfillPaidOrder(req.db, checkoutSession);
+    try {
+      await fulfillPaidOrder(req.db, checkoutSession);
+    } catch (error) {
+      if (error.message === "PAYMENT_AMOUNT_MISMATCH") {
+        console.error("PayMongo confirmed a payment amount that does not match the registration total.");
+        return res.status(409).json({
+          error: "The confirmed payment amount does not match this registration. Contact the event organizer for help.",
+        });
+      }
+      throw error;
+    }
     await sendRegistrationConfirmation(req.db, registration.number);
     registration = await req.db.collection("payment_registrations").findOne(
       { statusToken: req.params.orderNumber },
@@ -1266,52 +1300,6 @@ app.post("/api/public/orders/:orderToken/cancel", async (req, res) => {
     return res.json({ cancelled: false, status: latest?.status || "Unknown" });
   }
   return res.json({ cancelled: true, status: "Cancelled" });
-});
-
-app.post("/api/webhooks/paymongo", async (req, res) => {
-  if (!payMongoSecretKey?.startsWith("sk_test_") || !payMongoWebhookSecret || !Buffer.isBuffer(req.rawBody)) {
-    return res.status(503).json({ error: "PayMongo webhook verification is not configured." });
-  }
-  const signatureHeader = req.get("paymongo-signature") || "";
-  const signatureFields = Object.fromEntries(signatureHeader.split(",").map((part) => {
-    const [key, value] = part.trim().split("=", 2);
-    return [key, value];
-  }));
-  const timestamp = Number(signatureFields.t);
-  const receivedSignature = signatureFields.te;
-  if (!Number.isInteger(timestamp) || Math.abs(Date.now() / 1000 - timestamp) > 300
-    || !/^[a-f0-9]{64}$/i.test(receivedSignature || "")) {
-    return res.status(400).json({ error: "Invalid PayMongo webhook signature." });
-  }
-  const expectedSignature = crypto.createHmac("sha256", payMongoWebhookSecret)
-    .update(`${timestamp}.${req.rawBody.toString("utf8")}`)
-    .digest();
-  const actualSignature = Buffer.from(receivedSignature, "hex");
-  if (actualSignature.length !== expectedSignature.length || !crypto.timingSafeEqual(actualSignature, expectedSignature)) {
-    return res.status(400).json({ error: "Invalid PayMongo webhook signature." });
-  }
-
-  const eventData = req.body?.data;
-  const attributes = eventData?.attributes;
-  const eventType = attributes?.type || eventData?.type || req.body?.type;
-  const checkoutSession = attributes?.data?.data || attributes?.data || eventData?.data;
-  if (eventType === "checkout_session.payment.paid") {
-    const fulfilled = await fulfillPaidOrder(req.db, checkoutSession);
-    const referenceNumber = checkoutSession?.attributes?.reference_number;
-    if (!fulfilled && referenceNumber) {
-      const registration = await req.db.collection("payment_registrations").findOne(
-        { number: referenceNumber, checkoutSessionId: checkoutSession.id },
-        { projection: { status: 1 } },
-      );
-      if (!registration || registration.status !== "Paid") {
-        return res.status(422).json({ error: "Paid checkout could not be matched to a registration." });
-      }
-    } else if (!referenceNumber) {
-      return res.status(422).json({ error: "PayMongo checkout has no registration reference." });
-    }
-    await sendRegistrationConfirmation(req.db, referenceNumber);
-  }
-  return res.status(200).json({ received: true });
 });
 
 app.use("/api", requireAuth);
@@ -1403,6 +1391,69 @@ app.patch("/api/events/:id/publish", async (req, res) => {
   return res.json(serialize(result));
 });
 
+app.patch("/api/events/:id/finish", async (req, res) => {
+  const id = objectId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ error: "Invalid event ID." });
+  }
+
+  const events = req.db.collection("events");
+  const event = await events.findOne({ _id: id, ownerId: req.userId });
+  if (!event) {
+    return res.status(404).json({ error: "Event not found." });
+  }
+  if (event.status !== "On sale") {
+    return res.status(409).json({ error: "Only published events can be marked as finished." });
+  }
+  const eventEndAt = getEventEndAt(event);
+  if (!eventEndAt || eventEndAt > new Date()) {
+    return res.status(409).json({ error: "An event can only be finished after its end date and time." });
+  }
+
+  const result = await events.findOneAndUpdate(
+    {
+      _id: id,
+      ownerId: req.userId,
+      status: "On sale",
+      date: event.date,
+      endDate: event.endDate,
+      time: event.time,
+      multipleDay: event.multipleDay,
+    },
+    { $set: { status: "Finished", finishedAt: new Date() } },
+    { returnDocument: "after" },
+  );
+  if (!result) {
+    return res.status(409).json({ error: "The event changed while it was being finished. Refresh and try again." });
+  }
+  return res.json(serialize(result));
+});
+
+app.patch("/api/events/:id/cancel", async (req, res) => {
+  const id = objectId(req.params.id);
+  if (!id) {
+    return res.status(400).json({ error: "Invalid event ID." });
+  }
+
+  const events = req.db.collection("events");
+  const result = await events.findOneAndUpdate(
+    { _id: id, ownerId: req.userId, status: { $in: ["Draft", "On sale"] } },
+    { $set: { status: "Cancelled", cancelledAt: new Date() } },
+    { returnDocument: "after" },
+  );
+  if (!result) {
+    const existingEvent = await events.findOne(
+      { _id: id, ownerId: req.userId },
+      { projection: { status: 1 } },
+    );
+    if (!existingEvent) {
+      return res.status(404).json({ error: "Event not found." });
+    }
+    return res.status(409).json({ error: "Only draft or published events can be cancelled." });
+  }
+  return res.json(serialize(result));
+});
+
 app.patch("/api/events/:id", async (req, res) => {
   const id = objectId(req.params.id);
   const values = validateEvent(req.body);
@@ -1474,6 +1525,30 @@ app.patch("/api/attendees/:id", async (req, res) => {
   const id = objectId(req.params.id);
   if (!id || typeof req.body.checkedIn !== "boolean") {
     return res.status(400).json({ error: "Invalid attendee update." });
+  }
+  if (req.body.checkedIn) {
+    const attendee = await req.db.collection("attendees").findOne(
+      { _id: id, ownerId: req.userId },
+      { projection: { eventId: 1, eventCode: 1, date: 1, endDate: 1 } },
+    );
+    if (!attendee) {
+      return res.status(404).json({ error: "Attendee not found." });
+    }
+    const event = attendee.eventId
+      ? await req.db.collection("events").findOne(
+        { _id: attendee.eventId, ownerId: req.userId },
+        { projection: { date: 1, endDate: 1, multipleDay: 1 } },
+      )
+      : attendee.eventCode
+        ? await req.db.collection("events").findOne(
+          { eventCode: attendee.eventCode, ownerId: req.userId },
+          { projection: { date: 1, endDate: 1, multipleDay: 1 } },
+        )
+        : null;
+    const checkInEvent = event || { ...attendee, multipleDay: Boolean(attendee.endDate) };
+    if (!isEventDateToday(checkInEvent)) {
+      return res.status(409).json({ error: "Attendees can only be checked in on the event date." });
+    }
   }
   const result = await req.db.collection("attendees").findOneAndUpdate(
     { _id: id, ownerId: req.userId },
