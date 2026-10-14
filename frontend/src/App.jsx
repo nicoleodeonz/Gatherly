@@ -78,14 +78,7 @@ function getTodayDateInputValue() {
 }
 
 function getPhilippineDateValue() {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Manila",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date());
-  const part = (type) => parts.find((item) => item.type === type)?.value || "";
-  return `${part("year")}-${part("month")}-${part("day")}`;
+  return getManilaDateValue(new Date());
 }
 
 function isEventDateToday(event) {
@@ -95,6 +88,11 @@ function isEventDateToday(event) {
     : startDate;
   const today = getPhilippineDateValue();
   return Boolean(startDate && endDate && startDate <= today && today <= endDate);
+}
+
+function hasEventStartDatePassed(event, now) {
+  const startDate = toDateInputValue(event.date || "");
+  return Boolean(startDate && startDate < getManilaDateValue(new Date(now)));
 }
 
 function getEventStartAt(event) {
@@ -118,6 +116,124 @@ function getDaysUntilEvent(event, now) {
   return Math.round((eventDayUtc - todayDayUtc) / 86400000);
 }
 
+function getManilaDateValue(date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Manila",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const part = (type) => parts.find((item) => item.type === type)?.value || "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function buildRegistrationGrowth(attendees, period, now) {
+  const today = getManilaDateValue(new Date(now));
+  const [year, month, day] = today.split("-").map(Number);
+  const todayUtc = Date.UTC(year, month - 1, day);
+  let buckets;
+  let firstWeekStart;
+  if (period === "day") {
+    buckets = Array.from({ length: 24 }, (_, hour) => ({
+      key: String(hour).padStart(2, "0"),
+      label: new Intl.DateTimeFormat("en", {
+        hour: "numeric",
+        hour12: true,
+        timeZone: "UTC",
+      }).format(new Date(Date.UTC(2024, 0, 1, hour))),
+      registrations: 0,
+    }));
+  } else if (period === "week") {
+    const mondayOffset = (new Date(todayUtc).getUTCDay() + 6) % 7;
+    firstWeekStart = todayUtc - mondayOffset * 86400000;
+    buckets = Array.from({ length: 7 }, (_, index) => {
+      const date = new Date(firstWeekStart + index * 86400000);
+      return {
+        key: date.toISOString().slice(0, 10),
+        label: new Intl.DateTimeFormat("en", { weekday: "short", timeZone: "UTC" }).format(date),
+        registrations: 0,
+      };
+    });
+  } else {
+    const firstOfMonth = Date.UTC(year, month - 1, 1);
+    const lastOfMonth = Date.UTC(year, month, 0);
+    const mondayOffset = (new Date(firstOfMonth).getUTCDay() + 6) % 7;
+    firstWeekStart = firstOfMonth - mondayOffset * 86400000;
+    buckets = [];
+    for (let weekStart = firstWeekStart; weekStart <= lastOfMonth; weekStart += 7 * 86400000) {
+      const visibleStart = Math.max(weekStart, firstOfMonth);
+      const visibleEnd = Math.min(weekStart + 6 * 86400000, lastOfMonth);
+      const startDate = new Date(visibleStart);
+      const endDate = new Date(visibleEnd);
+      buckets.push({
+        key: new Date(weekStart).toISOString().slice(0, 10),
+        label: `${startDate.getUTCDate()}–${endDate.getUTCDate()}`,
+        registrations: 0,
+      });
+    }
+  }
+  const bucketByKey = new Map(buckets.map((bucket, index) => [bucket.key, index]));
+
+  attendees.forEach((attendee) => {
+    if (!attendee.createdAt) return;
+    const registeredAt = new Date(attendee.createdAt);
+    if (Number.isNaN(registeredAt.getTime())) return;
+    const registrationDate = getManilaDateValue(registeredAt);
+    const bucketKey = period === "day"
+      ? new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Manila", hour: "2-digit", hourCycle: "h23" }).format(registeredAt)
+      : period === "week"
+        ? registrationDate
+        : (() => {
+          const [registrationYear, registrationMonth, registrationDay] = registrationDate.split("-").map(Number);
+          const registrationUtc = Date.UTC(registrationYear, registrationMonth - 1, registrationDay);
+          const weekStart = registrationUtc - ((new Date(registrationUtc).getUTCDay() + 6) % 7) * 86400000;
+          return new Date(weekStart).toISOString().slice(0, 10);
+        })();
+    const bucketIndex = bucketByKey.get(bucketKey);
+    if (bucketIndex !== undefined) buckets[bucketIndex].registrations += 1;
+  });
+
+  return buckets;
+}
+
+function getAnalyticsBucketKey(date, period) {
+  const dateInManila = getManilaDateValue(date);
+  if (period === "day") {
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Manila",
+      hour: "2-digit",
+      hourCycle: "h23",
+    }).format(date);
+  }
+  if (period === "week") return dateInManila;
+
+  const [year, month, day] = dateInManila.split("-").map(Number);
+  const utcDay = Date.UTC(year, month - 1, day);
+  const weekStart = utcDay - ((new Date(utcDay).getUTCDay() + 6) % 7) * 86400000;
+  return new Date(weekStart).toISOString().slice(0, 10);
+}
+
+function buildRevenueGrowth(orders, period, now) {
+  const buckets = buildRegistrationGrowth([], period, now)
+    .map((bucket) => ({ ...bucket, revenue: 0 }));
+  const bucketByKey = new Map(buckets.map((bucket, index) => [bucket.key, index]));
+
+  orders.forEach((order) => {
+    const paidDate = order.paidAt || order.createdAt;
+    if (!paidDate) return;
+    const paidAt = new Date(paidDate);
+    if (Number.isNaN(paidAt.getTime())) return;
+    const bucketIndex = bucketByKey.get(getAnalyticsBucketKey(paidAt, period));
+    if (bucketIndex === undefined) return;
+    const amount = Number.isFinite(order.amountCents)
+      ? order.amountCents / 100
+      : Number(String(order.amount || "").replace(/[^\d.]/g, ""));
+    if (Number.isFinite(amount)) buckets[bucketIndex].revenue += amount;
+  });
+
+  return buckets;
+}
+
 function toTimeInputValue(value) {
   const match = value.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
   if (!match) return /^\d{2}:\d{2}$/.test(value) ? value : "";
@@ -126,7 +242,7 @@ function toTimeInputValue(value) {
   return `${String(hours).padStart(2, "0")}:${match[2]}`;
 }
 
-function hasEventEnded(event) {
+function hasEventEndedAt(event, now) {
   const date = event.multipleDay && event.endDate ? event.endDate : event.date;
   const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date || "");
   const timeMatch = /^(\d{2}):(\d{2})$/.exec(toTimeInputValue(event.time || ""));
@@ -137,7 +253,11 @@ function hasEventEnded(event) {
   const parsedDate = new Date(dateUtc);
   if (parsedDate.toISOString().slice(0, 10) !== date) return false;
   const eventEnd = dateUtc + (Number(hours) - 8) * 60 * 60 * 1000 + Number(minutes) * 60 * 1000;
-  return Date.now() >= eventEnd;
+  return now >= eventEnd;
+}
+
+function hasEventEnded(event) {
+  return hasEventEndedAt(event, Date.now());
 }
 
 function DashboardSidebar({ active, setActive, mobileOpen, setMobileOpen, onHome, onHelp, onSettings, orderCount }) {
@@ -221,9 +341,12 @@ function Dashboard({ user, onHome, onSignOut }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [page, setPage] = useState(1);
-  const [analyticsRange, setAnalyticsRange] = useState("30 days");
+  const [analyticsPeriod, setAnalyticsPeriod] = useState("day");
   const [analyticsEventTab, setAnalyticsEventTab] = useState("overview");
   const [hiddenAnalyticsEventCodes, setHiddenAnalyticsEventCodes] = useState([]);
+  const [comparisonModeOpen, setComparisonModeOpen] = useState(false);
+  const [comparisonEventCodes, setComparisonEventCodes] = useState([]);
+  const [comparisonEventDraft, setComparisonEventDraft] = useState([]);
   const [orders, setOrders] = useState([]);
   const [attendees, setAttendees] = useState([]);
 
@@ -478,13 +601,74 @@ function Dashboard({ user, onHome, onSignOut }) {
     : attendees;
   const analyticsTabEvents = eventTabEvents.filter((event) => !hiddenAnalyticsEventCodes.includes(event.eventCode));
   const selectedAnalyticsEvent = analyticsTabEvents.find((event) => event.eventCode === analyticsEventTab);
-  const analyticsEvents = selectedAnalyticsEvent ? [selectedAnalyticsEvent] : analyticsTabEvents;
+  const activeComparisonEvents = comparisonEventCodes.length >= 2
+    ? analyticsTabEvents.filter((event) => comparisonEventCodes.includes(event.eventCode))
+    : [];
+  const isComparingAnalyticsEvents = !selectedAnalyticsEvent && activeComparisonEvents.length >= 2;
+  const analyticsEvents = selectedAnalyticsEvent
+    ? [selectedAnalyticsEvent]
+    : isComparingAnalyticsEvents ? activeComparisonEvents : analyticsTabEvents;
   const analyticsEventCodes = new Set(analyticsEvents.map((event) => event.eventCode));
   const analyticsOrders = orders.filter((order) => order.status === "Paid" && analyticsEventCodes.has(order.eventCode));
   const analyticsAttendees = attendees.filter((person) => analyticsEventCodes.has(person.eventCode));
+  const checkInSummary = analyticsAttendees.reduce((summary, attendee) => {
+    const attendeeEvent = analyticsEvents.find((event) => event.eventCode === attendee.eventCode || event.id === attendee.eventId);
+    if (attendeeEvent?.status === "Cancelled") return summary;
+    if (attendee.checkedIn) {
+      summary.checkedIn += 1;
+    } else if (attendeeEvent
+      ? attendeeEvent.status === "Finished" || hasEventEndedAt(attendeeEvent, currentTime)
+      : hasEventEndedAt(attendee, currentTime)) {
+      summary.noShow += 1;
+    } else {
+      summary.notYetCheckedIn += 1;
+    }
+    return summary;
+  }, { checkedIn: 0, noShow: 0, notYetCheckedIn: 0 });
+  const checkInTotal = checkInSummary.checkedIn + checkInSummary.noShow + checkInSummary.notYetCheckedIn;
+  const checkInRate = checkInTotal ? Math.round((checkInSummary.checkedIn / checkInTotal) * 100) : 0;
+  const checkedInStop = checkInTotal ? (checkInSummary.checkedIn / checkInTotal) * 100 : 0;
+  const noShowStop = checkInTotal ? checkedInStop + (checkInSummary.noShow / checkInTotal) * 100 : 0;
+  const checkInPieStyle = checkInTotal
+    ? { background: `conic-gradient(#756FB8 0% ${checkedInStop}%, #D97764 ${checkedInStop}% ${noShowStop}%, #E8E5DF ${noShowStop}% 100%)` }
+    : { background: "#E8E5DF" };
+  const registrationGrowth = currentTime
+    ? buildRegistrationGrowth(analyticsAttendees, analyticsPeriod, currentTime)
+    : [];
+  const registrationGrowthTotal = registrationGrowth.reduce((total, bucket) => total + bucket.registrations, 0);
+  const registrationGrowthMax = Math.max(1, ...registrationGrowth.map((bucket) => bucket.registrations));
+  const registrationChart = registrationGrowth.map((bucket, index) => ({
+    ...bucket,
+    x: registrationGrowth.length > 1 ? 48 + index * (660 / (registrationGrowth.length - 1)) : 378,
+    y: 190 - (bucket.registrations / registrationGrowthMax) * 160,
+  }));
+  const registrationChartLine = registrationChart.map((point) => `${point.x},${point.y}`).join(" ");
+  const revenueGrowth = currentTime
+    ? buildRevenueGrowth(analyticsOrders, analyticsPeriod, currentTime)
+    : [];
+  const revenueGrowthTotal = revenueGrowth.reduce((total, bucket) => total + bucket.revenue, 0);
+  const revenueGrowthMax = Math.max(1, ...revenueGrowth.map((bucket) => bucket.revenue));
+  const revenueChart = revenueGrowth.map((bucket, index) => ({
+    ...bucket,
+    x: revenueGrowth.length > 1 ? 48 + index * (660 / (revenueGrowth.length - 1)) : 378,
+    y: 190 - (bucket.revenue / revenueGrowthMax) * 160,
+  }));
+  const revenueChartLine = revenueChart.map((point) => `${point.x},${point.y}`).join(" ");
   const analyticsTicketsSold = analyticsEvents.reduce((sum, event) => sum + event.sold, 0);
   const analyticsCapacity = analyticsEvents.reduce((sum, event) => sum + event.total, 0);
   const analyticsRevenue = analyticsOrders.reduce((sum, order) => sum + Number(String(order.amount).replace(/[^\d.]/g, "")), 0);
+  const comparisonRows = isComparingAnalyticsEvents ? analyticsEvents.map((event) => {
+    const eventAttendees = attendees.filter((attendee) => attendee.eventCode === event.eventCode);
+    const eventRevenue = orders
+      .filter((order) => order.status === "Paid" && order.eventCode === event.eventCode)
+      .reduce((sum, order) => sum + Number(String(order.amount).replace(/[^\d.]/g, "")), 0);
+    return {
+      event,
+      attendeeCount: eventAttendees.length,
+      checkedInCount: eventAttendees.filter((attendee) => attendee.checkedIn).length,
+      revenue: eventRevenue,
+    };
+  }) : [];
   const currency = new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP", maximumFractionDigits: 0 });
 
   return (
@@ -536,6 +720,21 @@ function Dashboard({ user, onHome, onSignOut }) {
                 <Icon name="archive" className="size-4" />{showArchivedEvents ? "Back to events" : "Archive"}
               </button>}
             </div>}
+            {active === "Analytics" && !selectedAnalyticsEvent && <button
+              type="button"
+              onClick={() => {
+                setComparisonEventDraft(comparisonEventCodes.length
+                  ? comparisonEventCodes
+                  : analyticsTabEvents.map((event) => event.eventCode));
+                setComparisonModeOpen(true);
+              }}
+              disabled={analyticsTabEvents.length < 2}
+              title={analyticsTabEvents.length < 2 ? "Publish at least two events to compare them." : ""}
+              className={`flex h-12 items-center justify-center gap-2 rounded-xl border px-5 text-sm font-bold transition disabled:cursor-not-allowed disabled:opacity-45 ${isComparingAnalyticsEvents ? "border-[#756FB8] bg-[#E7E6F2] text-[#625CA4]" : "border-[#756FB8] bg-transparent text-[#625CA4] hover:bg-[#E7E6F2]"}`}
+            >
+              <Icon name="chart" className="size-4" />
+              {isComparingAnalyticsEvents ? `Comparison Mode · ${activeComparisonEvents.length}` : "Comparison Mode"}
+            </button>}
           </div>
 
           {active === "Overview" && <><section className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -585,7 +784,7 @@ function Dashboard({ user, onHome, onSignOut }) {
                 </div>
                 <button type="button" aria-label="Choose events shown in order tabs" title="Configure event tabs" onClick={() => setEventTabSettingsSection("orders")} className="grid size-9 shrink-0 place-items-center rounded-xl text-black/45 transition hover:bg-[#F8F6F3] hover:text-[#756FB8]"><Icon name="settings" className="size-5" /></button>
               </div>
-              <div className="mt-4"><h2 className="text-lg font-extrabold">Recent orders</h2><p className="mt-1 text-xs text-black/40">Review payments and process refunds{activeOrderEventTab !== "overview" ? ` · ${visibleOrderTabs.find((event) => event.eventCode === activeOrderEventTab)?.name || ""}` : ""}.</p></div>
+              <div className="mt-4"><h2 className="text-lg font-extrabold">Recent orders</h2><p className="mt-1 text-xs text-black/40">Review payments{activeOrderEventTab !== "overview" ? ` · ${visibleOrderTabs.find((event) => event.eventCode === activeOrderEventTab)?.name || ""}` : ""}.</p></div>
             </div>
             <div className="divide-y divide-black/[.05]">
               {visibleOrders.map((order) => <div key={order.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:px-6">
@@ -668,7 +867,64 @@ function Dashboard({ user, onHome, onSignOut }) {
                 <Icon name="settings" className="size-5" />
               </button>
             </div>
-            <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-extrabold">Ticket performance</h2><p className="mt-1 text-xs text-black/40">{selectedAnalyticsEvent ? `Performance for ${selectedAnalyticsEvent.name}.` : "Performance across your published events."}</p></div><select value={analyticsRange} onChange={(e) => setAnalyticsRange(e.target.value)} className="h-10 rounded-xl border border-black/10 bg-white px-3 text-xs font-bold"><option>7 days</option><option>30 days</option><option>12 months</option></select></div>
+            <section aria-labelledby="revenue-analytics-title" className="mt-6 rounded-2xl border border-black/[.06] p-5 sm:p-6">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h2 id="revenue-analytics-title" className="text-lg font-extrabold">Revenue Analytics</h2>
+                  <p className="mt-1 text-xs text-black/40">
+                    {selectedAnalyticsEvent ? `Paid ticket revenue for ${selectedAnalyticsEvent.name}.` : "Paid ticket revenue across the events shown in Analytics."}
+                  </p>
+                </div>
+                <p className="text-xs font-semibold text-black/45">
+                  {analyticsPeriod === "day" ? "Today" : analyticsPeriod === "week" ? "This week" : "This month"}
+                </p>
+              </div>
+              <div className="mt-5 flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <p className="text-3xl font-extrabold">{currency.format(revenueGrowthTotal)}</p>
+                  <p className="mt-1 text-xs text-black/40">Revenue in selected period</p>
+                </div>
+                <p className="text-xs text-black/45">All-time paid revenue: <span className="font-bold text-[#2D3142]">{currency.format(analyticsRevenue)}</span></p>
+              </div>
+              {revenueGrowthTotal > 0
+                ? <div className="mt-4 w-full overflow-x-auto">
+                  <svg
+                    viewBox="0 0 720 240"
+                    role="img"
+                    aria-label={`Revenue analytics, grouped by ${analyticsPeriod}, ${currency.format(revenueGrowthTotal)} in paid ticket revenue`}
+                    className="h-64 min-w-[600px] w-full"
+                  >
+                    {[0, 1, 2, 3].map((tick) => {
+                      const y = 190 - tick * (160 / 3);
+                      const value = revenueGrowthMax * tick / 3;
+                      return <g key={tick}>
+                        <line x1="48" y1={y} x2="708" y2={y} stroke="#EAE8E5" strokeDasharray={tick === 0 ? "0" : "4 5"} />
+                        <text x="42" y={y + 4} textAnchor="end" className="fill-black/40 text-[9px]">{value >= 1000 ? `₱${(value / 1000).toFixed(1)}k` : `₱${Math.round(value)}`}</text>
+                      </g>;
+                    })}
+                    <polygon points={`48,190 ${revenueChartLine} 708,190`} fill="url(#revenue-growth-fill)" />
+                    <polyline points={revenueChartLine} fill="none" stroke="#756FB8" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                    {revenueChart.map((point) => <g key={point.key}>
+                      <circle cx={point.x} cy={point.y} r="4" fill="white" stroke="#756FB8" strokeWidth="2">
+                        <title>{`${point.label}: ${currency.format(point.revenue)}`}</title>
+                      </circle>
+                    </g>)}
+                    {revenueChart.map((point, index) => {
+                      const labelInterval = analyticsPeriod === "day" ? 3 : 1;
+                      if (index % labelInterval !== 0 && index !== revenueChart.length - 1) return null;
+                      return <text key={point.key} x={point.x} y="218" textAnchor="middle" className="fill-black/45 text-[10px]">{point.label}</text>;
+                    })}
+                    <defs>
+                      <linearGradient id="revenue-growth-fill" x1="0" x2="0" y1="0" y2="1">
+                        <stop offset="0%" stopColor="#756FB8" stopOpacity=".2" />
+                        <stop offset="100%" stopColor="#756FB8" stopOpacity="0" />
+                      </linearGradient>
+                    </defs>
+                  </svg>
+                </div>
+                : <p className="mt-5 rounded-xl bg-[#F8F6F3] p-4 text-xs text-black/45">No paid ticket revenue recorded for this period.</p>}
+            </section>
+            <div className="mt-6"><h2 className="text-lg font-extrabold">Ticket performance</h2><p className="mt-1 text-xs text-black/40">{selectedAnalyticsEvent ? `Performance for ${selectedAnalyticsEvent.name}.` : "Performance across your published events."}</p></div>
             <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               {[
                 ["Tickets sold", `${analyticsTicketsSold.toLocaleString("en-PH")} / ${analyticsCapacity.toLocaleString("en-PH")}`],
@@ -680,11 +936,160 @@ function Dashboard({ user, onHome, onSignOut }) {
                 <p className="mt-2 text-lg font-extrabold">{value}</p>
               </div>)}
             </div>
+            {isComparingAnalyticsEvents && <div className="mt-6 overflow-hidden rounded-2xl border border-black/[.06]">
+              <div className="border-b border-black/[.06] bg-[#F8F6F3] px-5 py-4">
+                <h2 className="text-sm font-extrabold">Event comparison</h2>
+                <p className="mt-1 text-xs text-black/45">Comparing {comparisonRows.length} selected events.</p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[640px] text-left text-xs">
+                  <thead className="text-[10px] font-bold uppercase tracking-wide text-black/40">
+                    <tr>
+                      <th className="px-5 py-3">Event</th>
+                      <th className="px-4 py-3">Tickets sold</th>
+                      <th className="px-4 py-3">Registrations</th>
+                      <th className="px-4 py-3">Checked in</th>
+                      <th className="px-5 py-3 text-right">Paid revenue</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {comparisonRows.map(({ event, attendeeCount, checkedInCount, revenue: eventRevenue }) => <tr key={event.eventCode} className="border-t border-black/[.05]">
+                      <th scope="row" className="max-w-64 truncate px-5 py-4 text-left font-bold">{event.name}</th>
+                      <td className="px-4 py-4">{event.sold.toLocaleString("en-PH")} / {event.total.toLocaleString("en-PH")}</td>
+                      <td className="px-4 py-4">{attendeeCount.toLocaleString("en-PH")}</td>
+                      <td className="px-4 py-4">{checkedInCount.toLocaleString("en-PH")}</td>
+                      <td className="px-5 py-4 text-right font-bold">{currency.format(eventRevenue)}</td>
+                    </tr>)}
+                  </tbody>
+                </table>
+              </div>
+            </div>}
             <div className="mt-8 space-y-6">
               {analyticsEvents.map((event) => { const percent = event.total > 0 ? Math.round((event.sold / event.total) * 100) : 0; return <div key={event.id}><div className="mb-2 flex items-center justify-between gap-4"><p className="truncate text-xs font-bold">{event.name}</p><p className="shrink-0 text-xs font-extrabold text-[#756FB8]">{percent}% · {event.sold}/{event.total}</p></div><div className="h-3 overflow-hidden rounded-full bg-black/[.05]"><div className="h-full rounded-full bg-[#756FB8] transition-all" style={{ width: `${Math.min(percent, 100)}%` }} /></div></div>; })}
             </div>
+            <section aria-labelledby="registration-growth-title" className="mt-8 rounded-2xl border border-black/[.06] p-5 sm:p-6">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h2 id="registration-growth-title" className="text-lg font-extrabold">Registration Growth Over Time</h2>
+                  <p className="mt-1 text-xs text-black/40">
+                    {selectedAnalyticsEvent ? `New registrations for ${selectedAnalyticsEvent.name}.` : "New registrations across the events shown in Analytics."}
+                  </p>
+                </div>
+                <label className="flex items-center gap-2 text-xs font-semibold text-black/50">
+                  <span>Group by</span>
+                  <select
+                    aria-label="Registration growth period"
+                    value={analyticsPeriod}
+                    onChange={(event) => setAnalyticsPeriod(event.target.value)}
+                    className="h-10 rounded-xl border border-black/10 bg-white px-3 text-xs font-bold text-[#2D3142] outline-none focus:border-[#756FB8]"
+                  >
+                    <option value="day">Day</option>
+                    <option value="week">Week</option>
+                    <option value="month">Month</option>
+                  </select>
+                </label>
+              </div>
+              <div className="mt-5 flex items-baseline gap-2">
+                <span className="text-2xl font-extrabold">{registrationGrowthTotal.toLocaleString("en-PH")}</span>
+                <span className="text-xs text-black/40">registrations in the selected period</span>
+              </div>
+              {registrationGrowth.length > 0 && <div className="mt-3 w-full overflow-x-auto">
+                <svg
+                  viewBox="0 0 720 240"
+                  role="img"
+                  aria-label={`Registration growth, grouped by ${analyticsPeriod}, ${registrationGrowthTotal} registrations`}
+                  className="h-64 min-w-[600px] w-full"
+                >
+                  {[0, 1, 2, 3].map((tick) => {
+                    const y = 190 - tick * (160 / 3);
+                    const value = Math.round(registrationGrowthMax * tick / 3);
+                    return <g key={tick}>
+                      <line x1="48" y1={y} x2="708" y2={y} stroke="#EAE8E5" strokeDasharray={tick === 0 ? "0" : "4 5"} />
+                      <text x="38" y={y + 4} textAnchor="end" className="fill-black/40 text-[10px]">{value}</text>
+                    </g>;
+                  })}
+                  <polygon points={`48,190 ${registrationChartLine} 708,190`} fill="url(#registration-growth-fill)" />
+                  <polyline points={registrationChartLine} fill="none" stroke="#756FB8" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+                  {registrationChart.map((point) => <g key={point.key}>
+                    <circle cx={point.x} cy={point.y} r="4" fill="white" stroke="#756FB8" strokeWidth="2">
+                      <title>{`${point.label}: ${point.registrations} registrations`}</title>
+                    </circle>
+                  </g>)}
+                  {registrationChart.map((point, index) => {
+                    const labelInterval = analyticsPeriod === "day" ? 3 : 1;
+                    if (index % labelInterval !== 0 && index !== registrationChart.length - 1) return null;
+                    return <text key={point.key} x={point.x} y="218" textAnchor="middle" className="fill-black/45 text-[10px]">{point.label}</text>;
+                  })}
+                  <defs>
+                    <linearGradient id="registration-growth-fill" x1="0" x2="0" y1="0" y2="1">
+                      <stop offset="0%" stopColor="#756FB8" stopOpacity=".2" />
+                      <stop offset="100%" stopColor="#756FB8" stopOpacity="0" />
+                    </linearGradient>
+                  </defs>
+                </svg>
+              </div>}
+              {registrationGrowthTotal === 0 && <p className="mt-2 text-xs text-black/40">No registrations recorded for this period.</p>}
+              <p className="mt-3 text-[11px] text-black/40">
+                {analyticsPeriod === "day" ? "Hourly registrations across the 24 hours of today." : analyticsPeriod === "week" ? "Daily registrations across this 7-day week." : "Weekly registrations across the current month."}
+              </p>
+            </section>
+            <section aria-labelledby="check-in-activity-title" className="mt-6 grid gap-4 lg:grid-cols-2">
+              <article className="rounded-2xl border border-black/[.06] p-5 sm:p-6">
+                <h2 id="check-in-activity-title" className="text-lg font-extrabold">Check-in Activity</h2>
+                <p className="mt-1 text-xs text-black/40">
+                  {selectedAnalyticsEvent ? `Attendance status for ${selectedAnalyticsEvent.name}.` : "Attendance status across the events shown in Analytics."}
+                </p>
+                <div className="mt-6 flex items-end justify-between gap-4">
+                  <div>
+                    <p className="text-3xl font-extrabold">{checkInSummary.checkedIn.toLocaleString("en-PH")}</p>
+                    <p className="mt-1 text-xs text-black/45">attendees checked in</p>
+                  </div>
+                  <p className="text-sm font-extrabold text-[#756FB8]">{checkInRate}%</p>
+                </div>
+                <div
+                  role="progressbar"
+                  aria-label="Attendee check-in rate"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={checkInRate}
+                  className="mt-4 h-2.5 overflow-hidden rounded-full bg-black/[.06]"
+                >
+                  <div className="h-full rounded-full bg-[#756FB8] transition-all" style={{ width: `${checkInRate}%` }} />
+                </div>
+                <p className="mt-3 text-[11px] text-black/40">
+                  {checkInSummary.notYetCheckedIn.toLocaleString("en-PH")} not checked in yet · {checkInSummary.noShow.toLocaleString("en-PH")} no-shows
+                </p>
+              </article>
+              <article className="rounded-2xl border border-black/[.06] p-5 sm:p-6">
+                <h2 className="text-lg font-extrabold">Check-ins & No-shows</h2>
+                <p className="mt-1 text-xs text-black/40">No-shows count unchecked attendees only after their event has ended.</p>
+                <div className="mt-5 flex flex-col items-center gap-6 sm:flex-row">
+                  <div
+                    role="img"
+                    aria-label={`Attendance breakdown: ${checkInSummary.checkedIn} checked in, ${checkInSummary.noShow} no-shows, ${checkInSummary.notYetCheckedIn} not checked in yet`}
+                    className="relative size-36 shrink-0 rounded-full"
+                    style={checkInPieStyle}
+                  >
+                    <div className="absolute inset-4 grid place-content-center rounded-full bg-white text-center">
+                      <span className="text-2xl font-extrabold">{checkInTotal.toLocaleString("en-PH")}</span>
+                      <span className="text-[10px] text-black/40">attendees</span>
+                    </div>
+                  </div>
+                  <ul className="w-full space-y-3 text-xs">
+                    {[
+                      ["Checked in", checkInSummary.checkedIn, "#756FB8"],
+                      ["No-show", checkInSummary.noShow, "#D97764"],
+                      ["Not checked in yet", checkInSummary.notYetCheckedIn, "#E8E5DF"],
+                    ].map(([label, count, color]) => <li key={label} className="flex items-center justify-between gap-3">
+                      <span className="flex items-center gap-2 text-black/55"><span className="size-2.5 rounded-full" style={{ backgroundColor: color }} />{label}</span>
+                      <span className="font-bold">{count.toLocaleString("en-PH")}{checkInTotal ? ` · ${Math.round((count / checkInTotal) * 100)}%` : ""}</span>
+                    </li>)}
+                  </ul>
+                </div>
+              </article>
+            </section>
             {analyticsTabEvents.length === 0 && <p className="mt-6 rounded-xl bg-[#F8F6F3] p-5 text-sm text-black/45">Publish an event to see its analytics here.</p>}
-            {analyticsTabEvents.length > 0 && <div className="mt-8 rounded-2xl bg-[#F8F6F3] p-5 text-xs leading-5 text-black/55">Showing ticket performance for {selectedAnalyticsEvent ? selectedAnalyticsEvent.name : `${analyticsTabEvents.length} published event${analyticsTabEvents.length === 1 ? "" : "s"}`} · {analyticsRange}.</div>}
+            {analyticsTabEvents.length > 0 && <div className="mt-8 rounded-2xl bg-[#F8F6F3] p-5 text-xs leading-5 text-black/55">Showing ticket performance for {selectedAnalyticsEvent ? selectedAnalyticsEvent.name : `${analyticsTabEvents.length} published event${analyticsTabEvents.length === 1 ? "" : "s"}`}.</div>}
           </section>}
 
           {(active === "Overview" || active === "Events") && <section className="rounded-2xl border border-black/[.055] bg-white shadow-[0_2px_10px_rgba(20,18,26,.025)]">
@@ -716,7 +1121,7 @@ function Dashboard({ user, onHome, onSignOut }) {
                         {event.status === "On sale" && event.eventCode && <button onClick={async () => { try { await navigator.clipboard.writeText(`${window.location.origin}/events/${event.eventCode}`); setNotice("Public event link copied."); } catch { setNotice("Unable to copy the event link. Open the event page and copy its URL."); } window.setTimeout(() => setNotice(""), 3200); }} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50">Copy link</button>}
                         {!archiveView && <button onClick={() => { setEditingEvent(event.id); setEventFormStep(1); setEventFormBasics({}); setMultipleDay(event.multipleDay === true); setPricingMode(event.pricingMode || "free"); setEventPrice(event.priceCents ? (event.priceCents / 100).toFixed(2) : ""); setTicketTypes(event.ticketTypes?.length ? event.ticketTypes.map((ticket) => ({ id: ticket.id, name: ticket.name, price: (ticket.priceCents / 100).toFixed(2) })) : [{ id: "", name: "General Admission", price: "" }, { id: "", name: "VIP", price: "" }]); setEventStartDate(toDateInputValue(event.date)); setEventEndDate(event.endDate || ""); setVenueInput(event.venue); setVenueSelected(true); setVenueSuggestions([]); setVenueSuggestionError(""); setModalOpen(true); }} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-[#756FB8] hover:bg-[#E7E6F2]">Edit</button>}
                         {event.status === "On sale" && <button disabled={!hasEventEnded(event)} title={hasEventEnded(event) ? "Mark this event as finished" : "Available after the event end date and time"} onClick={() => setActionConfirmation({ type: "finish", event })} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40">Finish</button>}
-                        {!archiveView && <button onClick={() => setActionConfirmation({ type: "cancel", event })} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-rose-600 hover:bg-rose-50">Cancel</button>}
+                        {!archiveView && !hasEventStartDatePassed(event, currentTime) && <button onClick={() => setActionConfirmation({ type: "cancel", event })} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-rose-600 hover:bg-rose-50">Cancel</button>}
                         {archiveView && <span className="px-2.5 py-2 text-[10px] font-semibold text-black/35">Archived</span>}
                       </div></td>
                     </tr>
@@ -1090,6 +1495,87 @@ function Dashboard({ user, onHome, onSignOut }) {
                 className="rounded-xl bg-[#756FB8] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#625CA4]"
               >
                 Done
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+      {comparisonModeOpen && (
+        <div
+          className="fixed inset-0 z-[70] grid place-items-center bg-[#2D3142]/65 p-4 backdrop-blur-sm"
+          onMouseDown={(event) => event.target === event.currentTarget && setComparisonModeOpen(false)}
+          onKeyDown={(event) => event.key === "Escape" && setComparisonModeOpen(false)}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="analytics-comparison-title"
+            className="w-full max-w-md rounded-3xl bg-white p-7 shadow-2xl"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-[.15em] text-[#756FB8]">Analytics overview</p>
+                <h2 id="analytics-comparison-title" className="mt-2 text-xl font-extrabold">Comparison Mode</h2>
+                <p className="mt-2 text-sm leading-6 text-black/50">Choose at least two events to compare their tickets, registrations, check-ins, and revenue.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setComparisonModeOpen(false)}
+                aria-label="Close comparison mode settings"
+                className="rounded-xl bg-black/[.04] p-2 text-black/50 transition hover:bg-black/[.08]"
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+            <div className="mt-6 max-h-72 space-y-2 overflow-y-auto">
+              {analyticsTabEvents.map((event) => {
+                const isSelected = comparisonEventDraft.includes(event.eventCode);
+                return <label key={event.eventCode} className="flex cursor-pointer items-center gap-3 rounded-xl border border-black/[.06] px-4 py-3 transition hover:bg-[#F8F6F3]">
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => setComparisonEventDraft((current) => isSelected
+                      ? current.filter((eventCode) => eventCode !== event.eventCode)
+                      : [...current, event.eventCode])}
+                    className="size-4 accent-[#756FB8]"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-sm font-semibold">{event.name}</span>
+                  {event.status === "Finished" && <span className="text-[10px] font-bold uppercase text-black/35">Finished</span>}
+                  {event.status === "Cancelled" && <span className="text-[10px] font-bold uppercase text-black/35">Cancelled</span>}
+                </label>;
+              })}
+              {analyticsTabEvents.length === 0 && <p className="rounded-xl bg-[#F8F6F3] p-4 text-sm text-black/45">Publish events to compare them here.</p>}
+            </div>
+            <p className="mt-3 text-xs text-black/40">{comparisonEventDraft.length} selected · choose at least 2 events</p>
+            <div className="mt-7 flex flex-wrap justify-end gap-3">
+              {comparisonEventCodes.length > 0 && <button
+                type="button"
+                onClick={() => {
+                  setComparisonEventCodes([]);
+                  setComparisonModeOpen(false);
+                }}
+                className="mr-auto rounded-xl px-4 py-3 text-sm font-bold text-rose-600 transition hover:bg-rose-50"
+              >
+                Clear comparison
+              </button>}
+              <button
+                type="button"
+                onClick={() => setComparisonModeOpen(false)}
+                className="rounded-xl border border-black/10 px-4 py-3 text-sm font-bold text-black/60 transition hover:bg-black/[.03]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={comparisonEventDraft.length < 2}
+                onClick={() => {
+                  setComparisonEventCodes(comparisonEventDraft);
+                  setAnalyticsEventTab("overview");
+                  setComparisonModeOpen(false);
+                }}
+                className="rounded-xl bg-[#756FB8] px-4 py-3 text-sm font-bold text-white transition hover:bg-[#625CA4] disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                Compare events
               </button>
             </div>
           </section>
