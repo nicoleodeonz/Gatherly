@@ -22,7 +22,12 @@ const emailJsPrivateKey = process.env.EMAILJS_PRIVATE_KEY;
 const emailJsTicketTemplateId = process.env.EMAILJS_TICKET_TEMPLATE_ID || "template_3lusa0s";
 const geoapifyApiKey = process.env.GEOAPIFY_API_KEY;
 const payMongoSecretKey = process.env.PAYMONGO_SECRET_KEY;
-const publicAppUrl = process.env.PUBLIC_APP_URL || "http://127.0.0.1:5173";
+const vercelDeploymentHost = process.env.VERCEL_ENV === "production"
+  ? process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL
+  : process.env.VERCEL_URL || process.env.VERCEL_PROJECT_PRODUCTION_URL;
+const publicAppUrl = vercelDeploymentHost
+  ? `https://${vercelDeploymentHost.replace(/^https?:\/\//i, "").replace(/\/+$/, "")}`
+  : process.env.PUBLIC_APP_URL || "http://127.0.0.1:5173";
 const emailJsTemplateId = "template_gyx5ecm";
 const verificationLifetimeMs = 10 * 60 * 1000;
 const verificationResendDelayMs = 60 * 1000;
@@ -190,6 +195,15 @@ function createEventCode() {
 
 function getRegistrationUrl(eventCode) {
   return `${publicAppUrl.replace(/\/+$/, "")}/events/${encodeURIComponent(eventCode)}`;
+}
+
+function isLocalRegistrationUrl(value) {
+  if (typeof value !== "string") return false;
+  try {
+    return ["localhost", "127.0.0.1", "::1"].includes(new URL(value).hostname);
+  } catch {
+    return false;
+  }
 }
 
 function objectId(value) {
@@ -1613,7 +1627,21 @@ app.get("/api/places/autocomplete", async (req, res) => {
 });
 
 app.get("/api/events", async (req, res) => {
-  const events = await req.db.collection("events").find({ ownerId: req.userId }).sort({ _id: -1 }).toArray();
+  const collection = req.db.collection("events");
+  const events = await collection.find({ ownerId: req.userId }).sort({ _id: -1 }).toArray();
+  if (vercelDeploymentHost) {
+    const eventsWithStaleLinks = events.filter((event) =>
+      event.status === "On sale"
+      && event.eventCode
+      && (!event.registrationUrl || isLocalRegistrationUrl(event.registrationUrl)));
+    await Promise.all(eventsWithStaleLinks.map((event) => collection.updateOne(
+      { _id: event._id, ownerId: req.userId, status: "On sale" },
+      { $set: { registrationUrl: getRegistrationUrl(event.eventCode) } },
+    )));
+    for (const event of eventsWithStaleLinks) {
+      event.registrationUrl = getRegistrationUrl(event.eventCode);
+    }
+  }
   res.json(events.map(serialize));
 });
 
