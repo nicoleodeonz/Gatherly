@@ -604,6 +604,57 @@ app.get("/api/auth/session", async (req, res) => {
   res.json({ user: { name: user.name, email: user.email, accountType } });
 });
 
+app.patch("/api/auth/profile", requireAuth, async (req, res) => {
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  if (!validString(name, 100)) {
+    return res.status(400).json({ error: "Enter a name up to 100 characters." });
+  }
+
+  const collection = req.accountType === "admin" ? "admin_accounts" : "customer_accounts";
+  const result = await req.db.collection(collection).findOneAndUpdate(
+    { _id: objectId(req.userId) },
+    { $set: { name } },
+    { returnDocument: "after", projection: { name: 1, email: 1 } },
+  );
+  if (!result) {
+    return res.status(404).json({ error: "Your account could not be found." });
+  }
+
+  res.json({ user: { name: result.name, email: result.email, accountType: req.accountType } });
+});
+
+app.post("/api/auth/change-password", requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (typeof currentPassword !== "string" || !currentPassword
+    || typeof newPassword !== "string" || newPassword.length < 8 || newPassword.length > 128
+    || !hasValidPasswordComplexity(newPassword)) {
+    return res.status(400).json({
+      error: "Enter your current password. New passwords must be 8–128 characters and include uppercase, lowercase, a digit, and a supported special character.",
+    });
+  }
+
+  const collection = req.accountType === "admin" ? "admin_accounts" : "customer_accounts";
+  const account = await req.db.collection(collection).findOne(
+    { _id: objectId(req.userId) },
+    { projection: { passwordHash: 1, passwordSalt: 1 } },
+  );
+  if (!account) {
+    return res.status(404).json({ error: "Your account could not be found." });
+  }
+  if (!await verifyPassword(currentPassword, account)) {
+    return res.status(401).json({ error: "Your current password is incorrect." });
+  }
+  if (await verifyPassword(newPassword, account)) {
+    return res.status(400).json({ error: "Your new password must be different from your current password." });
+  }
+
+  await req.db.collection(collection).updateOne(
+    { _id: objectId(req.userId) },
+    { $set: await hashPassword(newPassword) },
+  );
+  res.json({ message: "Password changed successfully." });
+});
+
 function getPublicEvent(event) {
   return {
     eventCode: event.eventCode,
@@ -803,6 +854,7 @@ async function fulfillPaidOrder(database, sessionData) {
         number: registration.number,
         buyer: registration.buyer,
         email: registration.email,
+        discoverySource: registration.discoverySource,
         event: registration.event,
         eventId: registration.eventId,
         eventCode: registration.eventCode,
@@ -821,6 +873,7 @@ async function fulfillPaidOrder(database, sessionData) {
       const attendee = {
         name: registration.buyer,
         email: registration.email,
+        discoverySource: registration.discoverySource,
         event: registration.event,
         eventId: registration.eventId,
         eventCode: registration.eventCode,
@@ -1035,13 +1088,13 @@ app.get("/api/public/events/:eventCode", async (req, res) => {
 });
 
 app.post("/api/public/events/:eventCode/register", async (req, res) => {
-  const { name, email, ticketTypeId } = req.body || {};
+  const { name, email, discoverySource, ticketTypeId } = req.body || {};
   if (req.body?.quantity !== undefined) {
     return res.status(400).json({ error: "Only one ticket may be registered per person per event." });
   }
-  if (!validString(name, 120) || !isValidEmail(email)
+  if (!validString(name, 120) || !isValidEmail(email) || !validString(discoverySource, 200)
     || !validString(ticketTypeId, 32)) {
-    return res.status(400).json({ error: "Enter a valid name, email, and ticket type." });
+    return res.status(400).json({ error: "Enter a valid name, email, referral source, and ticket type." });
   }
   const event = await req.db.collection("events").findOne({
     eventCode: req.params.eventCode,
@@ -1072,6 +1125,7 @@ app.post("/api/public/events/:eventCode/register", async (req, res) => {
     statusToken,
     buyer: name.trim(),
     email: normalizedEmail,
+    discoverySource: discoverySource.trim(),
     event: event.name,
     eventId: event._id,
     eventCode: event.eventCode,
@@ -1100,6 +1154,7 @@ app.post("/api/public/events/:eventCode/register", async (req, res) => {
     const attendee = {
       name: registrationDetails.buyer,
       email: registrationDetails.email,
+      discoverySource: registrationDetails.discoverySource,
       event: event.name,
       eventId: event._id,
       eventCode: event.eventCode,

@@ -296,7 +296,7 @@ function DashboardSidebar({ active, setActive, mobileOpen, setMobileOpen, onHome
   );
 }
 
-function Dashboard({ user, onHome, onSignOut }) {
+function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
   const [active, setActive] = useState("Overview");
   const [events, setEvents] = useState([]);
   const [search, setSearch] = useState("");
@@ -309,6 +309,14 @@ function Dashboard({ user, onHome, onSignOut }) {
   const [eventTabSettingsSection, setEventTabSettingsSection] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [utilityModal, setUtilityModal] = useState("");
+  const [profileAction, setProfileAction] = useState("");
+  const [profileName, setProfileName] = useState(user.name);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [profileError, setProfileError] = useState("");
+  const [profileMessage, setProfileMessage] = useState("");
+  const [profileSubmitting, setProfileSubmitting] = useState(false);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const [actionConfirmation, setActionConfirmation] = useState(null);
   const [actionSubmitting, setActionSubmitting] = useState(false);
@@ -342,11 +350,9 @@ function Dashboard({ user, onHome, onSignOut }) {
   const [notice, setNotice] = useState("");
   const [page, setPage] = useState(1);
   const [analyticsPeriod, setAnalyticsPeriod] = useState("day");
+  const [revenueAnalyticsPeriod, setRevenueAnalyticsPeriod] = useState("day");
   const [analyticsEventTab, setAnalyticsEventTab] = useState("overview");
   const [hiddenAnalyticsEventCodes, setHiddenAnalyticsEventCodes] = useState([]);
-  const [comparisonModeOpen, setComparisonModeOpen] = useState(false);
-  const [comparisonEventCodes, setComparisonEventCodes] = useState([]);
-  const [comparisonEventDraft, setComparisonEventDraft] = useState([]);
   const [orders, setOrders] = useState([]);
   const [attendees, setAttendees] = useState([]);
 
@@ -574,6 +580,55 @@ function Dashboard({ user, onHome, onSignOut }) {
     }
   }
 
+  async function saveProfile(event) {
+    event.preventDefault();
+    if (profileSubmitting) return;
+    setProfileSubmitting(true);
+    setProfileError("");
+    setProfileMessage("");
+    try {
+      const { user: updatedUser } = await api("/auth/profile", {
+        method: "PATCH",
+        body: JSON.stringify({ name: profileName }),
+      });
+      onUserUpdate(updatedUser);
+      setProfileName(updatedUser.name);
+      setProfileAction("");
+      setProfileMessage("Your profile has been updated.");
+    } catch (error) {
+      setProfileError(error.message);
+    } finally {
+      setProfileSubmitting(false);
+    }
+  }
+
+  async function changePassword(event) {
+    event.preventDefault();
+    if (profileSubmitting) return;
+    if (newPassword !== confirmNewPassword) {
+      setProfileError("The new passwords do not match.");
+      return;
+    }
+    setProfileSubmitting(true);
+    setProfileError("");
+    setProfileMessage("");
+    try {
+      const result = await api("/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmNewPassword("");
+      setProfileAction("");
+      setProfileMessage(result.message);
+    } catch (error) {
+      setProfileError(error.message);
+    } finally {
+      setProfileSubmitting(false);
+    }
+  }
+
   const firstName = user.name.split(" ")[0];
   const userInitials = user.name.split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
   const revenue = orders
@@ -601,16 +656,23 @@ function Dashboard({ user, onHome, onSignOut }) {
     : attendees;
   const analyticsTabEvents = eventTabEvents.filter((event) => !hiddenAnalyticsEventCodes.includes(event.eventCode));
   const selectedAnalyticsEvent = analyticsTabEvents.find((event) => event.eventCode === analyticsEventTab);
-  const activeComparisonEvents = comparisonEventCodes.length >= 2
-    ? analyticsTabEvents.filter((event) => comparisonEventCodes.includes(event.eventCode))
-    : [];
-  const isComparingAnalyticsEvents = !selectedAnalyticsEvent && activeComparisonEvents.length >= 2;
   const analyticsEvents = selectedAnalyticsEvent
     ? [selectedAnalyticsEvent]
-    : isComparingAnalyticsEvents ? activeComparisonEvents : analyticsTabEvents;
+    : analyticsTabEvents;
   const analyticsEventCodes = new Set(analyticsEvents.map((event) => event.eventCode));
   const analyticsOrders = orders.filter((order) => order.status === "Paid" && analyticsEventCodes.has(order.eventCode));
   const analyticsAttendees = attendees.filter((person) => analyticsEventCodes.has(person.eventCode));
+  const discoverySourceCounts = [...analyticsAttendees.reduce((counts, attendee) => {
+    const source = typeof attendee.discoverySource === "string" ? attendee.discoverySource.trim() : "";
+    const label = source || "Not provided";
+    const key = label.toLocaleLowerCase();
+    const entry = counts.get(key) || { label, count: 0 };
+    entry.count += 1;
+    counts.set(key, entry);
+    return counts;
+  }, new Map()).values()]
+    .sort((first, second) => second.count - first.count || first.label.localeCompare(second.label));
+  const discoverySourceMax = Math.max(1, ...discoverySourceCounts.map((source) => source.count));
   const checkInSummary = analyticsAttendees.reduce((summary, attendee) => {
     const attendeeEvent = analyticsEvents.find((event) => event.eventCode === attendee.eventCode || event.id === attendee.eventId);
     if (attendeeEvent?.status === "Cancelled") return summary;
@@ -644,7 +706,7 @@ function Dashboard({ user, onHome, onSignOut }) {
   }));
   const registrationChartLine = registrationChart.map((point) => `${point.x},${point.y}`).join(" ");
   const revenueGrowth = currentTime
-    ? buildRevenueGrowth(analyticsOrders, analyticsPeriod, currentTime)
+    ? buildRevenueGrowth(analyticsOrders, revenueAnalyticsPeriod, currentTime)
     : [];
   const revenueGrowthTotal = revenueGrowth.reduce((total, bucket) => total + bucket.revenue, 0);
   const revenueGrowthMax = Math.max(1, ...revenueGrowth.map((bucket) => bucket.revenue));
@@ -657,18 +719,6 @@ function Dashboard({ user, onHome, onSignOut }) {
   const analyticsTicketsSold = analyticsEvents.reduce((sum, event) => sum + event.sold, 0);
   const analyticsCapacity = analyticsEvents.reduce((sum, event) => sum + event.total, 0);
   const analyticsRevenue = analyticsOrders.reduce((sum, order) => sum + Number(String(order.amount).replace(/[^\d.]/g, "")), 0);
-  const comparisonRows = isComparingAnalyticsEvents ? analyticsEvents.map((event) => {
-    const eventAttendees = attendees.filter((attendee) => attendee.eventCode === event.eventCode);
-    const eventRevenue = orders
-      .filter((order) => order.status === "Paid" && order.eventCode === event.eventCode)
-      .reduce((sum, order) => sum + Number(String(order.amount).replace(/[^\d.]/g, "")), 0);
-    return {
-      event,
-      attendeeCount: eventAttendees.length,
-      checkedInCount: eventAttendees.filter((attendee) => attendee.checkedIn).length,
-      revenue: eventRevenue,
-    };
-  }) : [];
   const currency = new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP", maximumFractionDigits: 0 });
 
   return (
@@ -697,7 +747,7 @@ function Dashboard({ user, onHome, onSignOut }) {
               <Icon name="bell" className="size-[19px]" /><span className="absolute right-2.5 top-2.5 size-2 rounded-full border-2 border-white bg-[#756FB8]" />
             </button>
             <div className="h-8 w-px bg-black/10" />
-            <button onClick={() => setUtilityModal("profile")} aria-label="Open profile" title="Open profile" className="flex items-center gap-3 rounded-xl p-1.5 transition hover:bg-white">
+            <button onClick={() => { setUtilityModal("profile"); setProfileAction(""); setProfileError(""); setProfileMessage(""); }} aria-label="Open profile" title="Open profile" className="flex items-center gap-3 rounded-xl p-1.5 transition hover:bg-white">
               <div className="grid size-9 place-items-center rounded-xl bg-[#E6E2F2] text-xs font-extrabold text-[#7067AD]">{userInitials}</div>
               <div className="hidden text-left sm:block"><p className="text-sm font-bold">{user.name}</p><p className="text-[11px] text-black/40">Profile</p></div>
             </button>
@@ -720,21 +770,6 @@ function Dashboard({ user, onHome, onSignOut }) {
                 <Icon name="archive" className="size-4" />{showArchivedEvents ? "Back to events" : "Archive"}
               </button>}
             </div>}
-            {active === "Analytics" && !selectedAnalyticsEvent && <button
-              type="button"
-              onClick={() => {
-                setComparisonEventDraft(comparisonEventCodes.length
-                  ? comparisonEventCodes
-                  : analyticsTabEvents.map((event) => event.eventCode));
-                setComparisonModeOpen(true);
-              }}
-              disabled={analyticsTabEvents.length < 2}
-              title={analyticsTabEvents.length < 2 ? "Publish at least two events to compare them." : ""}
-              className={`flex h-12 items-center justify-center gap-2 rounded-xl border px-5 text-sm font-bold transition disabled:cursor-not-allowed disabled:opacity-45 ${isComparingAnalyticsEvents ? "border-[#756FB8] bg-[#E7E6F2] text-[#625CA4]" : "border-[#756FB8] bg-transparent text-[#625CA4] hover:bg-[#E7E6F2]"}`}
-            >
-              <Icon name="chart" className="size-4" />
-              {isComparingAnalyticsEvents ? `Comparison Mode · ${activeComparisonEvents.length}` : "Comparison Mode"}
-            </button>}
           </div>
 
           {active === "Overview" && <><section className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -745,7 +780,7 @@ function Dashboard({ user, onHome, onSignOut }) {
               ["Active events", String(activeEvents), `${draftEvents} drafts`, "calendar", "bg-[#F4E7D3] text-[#A17850]"],
             ].map(([label, value, change, icon, color]) => (
               <article key={label} className="rounded-2xl border border-black/[.055] bg-white p-5 shadow-[0_2px_10px_rgba(20,18,26,.025)]">
-                <div className="flex items-center justify-between"><div className={`grid size-10 place-items-center rounded-xl ${color}`}><Icon name={icon} className="size-[19px]" /></div><Icon name="more" className="size-5 text-black/25" /></div>
+                <div className="flex items-center"><div className={`grid size-10 place-items-center rounded-xl ${color}`}><Icon name={icon} className="size-[19px]" /></div></div>
                 <p className="mt-6 text-xs font-semibold text-black/40">{label}</p>
                 <div className="mt-1.5 flex items-end justify-between gap-2"><p className="text-2xl font-extrabold tracking-tight">{value}</p><span className={`mb-1 text-[11px] font-bold ${change.toString().startsWith("+") ? "text-emerald-600" : "text-black/35"}`}>{change}</span></div>
               </article>
@@ -875,9 +910,19 @@ function Dashboard({ user, onHome, onSignOut }) {
                     {selectedAnalyticsEvent ? `Paid ticket revenue for ${selectedAnalyticsEvent.name}.` : "Paid ticket revenue across the events shown in Analytics."}
                   </p>
                 </div>
-                <p className="text-xs font-semibold text-black/45">
-                  {analyticsPeriod === "day" ? "Today" : analyticsPeriod === "week" ? "This week" : "This month"}
-                </p>
+                <label className="flex items-center gap-2 text-xs font-semibold text-black/50">
+                  <span>Group by</span>
+                  <select
+                    aria-label="Revenue analytics period"
+                    value={revenueAnalyticsPeriod}
+                    onChange={(event) => setRevenueAnalyticsPeriod(event.target.value)}
+                    className="h-10 rounded-xl border border-black/10 bg-white px-3 text-xs font-bold text-[#2D3142] outline-none focus:border-[#756FB8]"
+                  >
+                    <option value="day">Day</option>
+                    <option value="week">Week</option>
+                    <option value="month">Month</option>
+                  </select>
+                </label>
               </div>
               <div className="mt-5 flex flex-wrap items-end justify-between gap-3">
                 <div>
@@ -891,7 +936,7 @@ function Dashboard({ user, onHome, onSignOut }) {
                   <svg
                     viewBox="0 0 720 240"
                     role="img"
-                    aria-label={`Revenue analytics, grouped by ${analyticsPeriod}, ${currency.format(revenueGrowthTotal)} in paid ticket revenue`}
+                    aria-label={`Revenue analytics, grouped by ${revenueAnalyticsPeriod}, ${currency.format(revenueGrowthTotal)} in paid ticket revenue`}
                     className="h-64 min-w-[600px] w-full"
                   >
                     {[0, 1, 2, 3].map((tick) => {
@@ -910,7 +955,7 @@ function Dashboard({ user, onHome, onSignOut }) {
                       </circle>
                     </g>)}
                     {revenueChart.map((point, index) => {
-                      const labelInterval = analyticsPeriod === "day" ? 3 : 1;
+                      const labelInterval = revenueAnalyticsPeriod === "day" ? 3 : 1;
                       if (index % labelInterval !== 0 && index !== revenueChart.length - 1) return null;
                       return <text key={point.key} x={point.x} y="218" textAnchor="middle" className="fill-black/45 text-[10px]">{point.label}</text>;
                     })}
@@ -923,6 +968,9 @@ function Dashboard({ user, onHome, onSignOut }) {
                   </svg>
                 </div>
                 : <p className="mt-5 rounded-xl bg-[#F8F6F3] p-4 text-xs text-black/45">No paid ticket revenue recorded for this period.</p>}
+              <p className="mt-3 text-[11px] text-black/40">
+                {revenueAnalyticsPeriod === "day" ? "Hourly revenue across the 24 hours of today." : revenueAnalyticsPeriod === "week" ? "Daily revenue across this 7-day week." : "Weekly revenue across the current month."}
+              </p>
             </section>
             <div className="mt-6"><h2 className="text-lg font-extrabold">Ticket performance</h2><p className="mt-1 text-xs text-black/40">{selectedAnalyticsEvent ? `Performance for ${selectedAnalyticsEvent.name}.` : "Performance across your published events."}</p></div>
             <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -936,34 +984,6 @@ function Dashboard({ user, onHome, onSignOut }) {
                 <p className="mt-2 text-lg font-extrabold">{value}</p>
               </div>)}
             </div>
-            {isComparingAnalyticsEvents && <div className="mt-6 overflow-hidden rounded-2xl border border-black/[.06]">
-              <div className="border-b border-black/[.06] bg-[#F8F6F3] px-5 py-4">
-                <h2 className="text-sm font-extrabold">Event comparison</h2>
-                <p className="mt-1 text-xs text-black/45">Comparing {comparisonRows.length} selected events.</p>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[640px] text-left text-xs">
-                  <thead className="text-[10px] font-bold uppercase tracking-wide text-black/40">
-                    <tr>
-                      <th className="px-5 py-3">Event</th>
-                      <th className="px-4 py-3">Tickets sold</th>
-                      <th className="px-4 py-3">Registrations</th>
-                      <th className="px-4 py-3">Checked in</th>
-                      <th className="px-5 py-3 text-right">Paid revenue</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {comparisonRows.map(({ event, attendeeCount, checkedInCount, revenue: eventRevenue }) => <tr key={event.eventCode} className="border-t border-black/[.05]">
-                      <th scope="row" className="max-w-64 truncate px-5 py-4 text-left font-bold">{event.name}</th>
-                      <td className="px-4 py-4">{event.sold.toLocaleString("en-PH")} / {event.total.toLocaleString("en-PH")}</td>
-                      <td className="px-4 py-4">{attendeeCount.toLocaleString("en-PH")}</td>
-                      <td className="px-4 py-4">{checkedInCount.toLocaleString("en-PH")}</td>
-                      <td className="px-5 py-4 text-right font-bold">{currency.format(eventRevenue)}</td>
-                    </tr>)}
-                  </tbody>
-                </table>
-              </div>
-            </div>}
             <div className="mt-8 space-y-6">
               {analyticsEvents.map((event) => { const percent = event.total > 0 ? Math.round((event.sold / event.total) * 100) : 0; return <div key={event.id}><div className="mb-2 flex items-center justify-between gap-4"><p className="truncate text-xs font-bold">{event.name}</p><p className="shrink-0 text-xs font-extrabold text-[#756FB8]">{percent}% · {event.sold}/{event.total}</p></div><div className="h-3 overflow-hidden rounded-full bg-black/[.05]"><div className="h-full rounded-full bg-[#756FB8] transition-all" style={{ width: `${Math.min(percent, 100)}%` }} /></div></div>; })}
             </div>
@@ -1087,6 +1107,27 @@ function Dashboard({ user, onHome, onSignOut }) {
                   </ul>
                 </div>
               </article>
+            </section>
+            <section aria-labelledby="discovery-source-title" className="mt-4 rounded-2xl border border-black/[.06] p-5 sm:p-6">
+              <h2 id="discovery-source-title" className="text-lg font-extrabold">How Attendees Heard About the Event</h2>
+              <p className="mt-1 text-xs text-black/40">
+                {selectedAnalyticsEvent ? `Registration sources for ${selectedAnalyticsEvent.name}.` : "Registration sources across the events shown in Analytics."}
+              </p>
+              {discoverySourceCounts.length > 0 ? <ol aria-label="Attendee discovery sources" className="mt-5 space-y-4">
+                {discoverySourceCounts.map((source) => (
+                  <li key={source.label} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 text-xs">
+                    <span className="truncate font-semibold text-black/65" title={source.label}>{source.label}</span>
+                    <span className="font-bold tabular-nums">{source.count.toLocaleString("en-PH")} <span className="font-normal text-black/40">· {Math.round((source.count / analyticsAttendees.length) * 100)}%</span></span>
+                    <div
+                      role="img"
+                      aria-label={`${source.label}: ${source.count} attendee${source.count === 1 ? "" : "s"}`}
+                      className="col-span-2 h-3 overflow-hidden rounded-full bg-black/[.05]"
+                    >
+                      <div className="h-full rounded-full bg-[#756FB8] transition-all" style={{ width: `${(source.count / discoverySourceMax) * 100}%` }} />
+                    </div>
+                  </li>
+                ))}
+              </ol> : <p className="mt-5 text-xs text-black/40">No attendee registration sources recorded yet.</p>}
             </section>
             {analyticsTabEvents.length === 0 && <p className="mt-6 rounded-xl bg-[#F8F6F3] p-5 text-sm text-black/45">Publish an event to see its analytics here.</p>}
             {analyticsTabEvents.length > 0 && <div className="mt-8 rounded-2xl bg-[#F8F6F3] p-5 text-xs leading-5 text-black/55">Showing ticket performance for {selectedAnalyticsEvent ? selectedAnalyticsEvent.name : `${analyticsTabEvents.length} published event${analyticsTabEvents.length === 1 ? "" : "s"}`}.</div>}
@@ -1216,7 +1257,7 @@ function Dashboard({ user, onHome, onSignOut }) {
             aria-labelledby="workspace-modal-title"
             className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl sm:p-8"
           >
-            <div className="mb-7 flex items-start justify-between">
+            <div className="mb-7 flex flex-wrap items-start justify-between gap-4">
               <div>
                 <p className="text-xs font-bold uppercase tracking-[.15em] text-[#756FB8]">Organizer workspace</p>
                 <h2 id="workspace-modal-title" className="mt-2 text-2xl font-extrabold tracking-tight">
@@ -1230,9 +1271,27 @@ function Dashboard({ user, onHome, onSignOut }) {
                       : "Manage your workspace notification preferences."}
                 </p>
               </div>
-              <button onClick={() => setUtilityModal("")} className="rounded-xl bg-black/[.04] p-2 text-black/50 transition hover:bg-black/[.08]" aria-label="Close dialog">
-                <Icon name="close" />
-              </button>
+              <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                {utilityModal === "profile" && <>
+                  <button
+                    type="button"
+                    onClick={() => { setProfileAction("edit"); setProfileName(user.name); setProfileError(""); setProfileMessage(""); }}
+                    className="rounded-xl border border-[#756FB8]/25 px-3 py-2 text-xs font-bold text-[#625CA4] transition hover:bg-[#E7E6F2]"
+                  >
+                    Edit profile
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setProfileAction("password"); setCurrentPassword(""); setNewPassword(""); setConfirmNewPassword(""); setProfileError(""); setProfileMessage(""); }}
+                    className="rounded-xl bg-[#756FB8] px-3 py-2 text-xs font-bold text-white transition hover:bg-[#625CA4]"
+                  >
+                    Change password
+                  </button>
+                </>}
+                <button onClick={() => setUtilityModal("")} className="rounded-xl bg-black/[.04] p-2 text-black/50 transition hover:bg-black/[.08]" aria-label="Close dialog">
+                  <Icon name="close" />
+                </button>
+              </div>
             </div>
 
             {utilityModal === "profile" && (
@@ -1247,12 +1306,46 @@ function Dashboard({ user, onHome, onSignOut }) {
                   </div>
                 </article>
                 <div className="rounded-2xl border border-black/[.06] p-6">
-                  <h3 className="text-sm font-extrabold">Account information</h3>
-                  <dl className="mt-5 space-y-4">
-                    <div><dt className="text-[11px] font-semibold text-black/40">Full name</dt><dd className="mt-1 text-sm font-bold">{user.name}</dd></div>
-                    <div><dt className="text-[11px] font-semibold text-black/40">Email address</dt><dd className="mt-1 break-all text-sm font-bold">{user.email}</dd></div>
-                  </dl>
-                  <p className="mt-6 rounded-xl bg-[#F8F6F3] p-4 text-xs leading-5 text-black/50">Your verified email is used to sign in and cannot be changed here.</p>
+                  {profileAction === "edit" ? <form onSubmit={saveProfile}>
+                    <h3 className="text-sm font-extrabold">Edit profile</h3>
+                    <label className="mt-5 block">
+                      <span className="mb-2 block text-[11px] font-semibold text-black/45">Full name</span>
+                      <input value={profileName} onChange={(event) => setProfileName(event.target.value)} required maxLength={100} autoComplete="name" className="h-11 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" />
+                    </label>
+                    <div className="mt-4">
+                      <p className="text-[11px] font-semibold text-black/40">Email address</p>
+                      <p className="mt-1 break-all text-sm font-bold">{user.email}</p>
+                    </div>
+                    <p className="mt-5 rounded-xl bg-[#F8F6F3] p-4 text-xs leading-5 text-black/50">Your verified email is used to sign in and cannot be changed here.</p>
+                    {profileError && <p role="alert" className="mt-4 text-xs font-semibold text-rose-600">{profileError}</p>}
+                    <div className="mt-5 flex justify-end gap-2">
+                      <button type="button" onClick={() => { setProfileAction(""); setProfileError(""); }} className="rounded-xl border border-black/10 px-4 py-2.5 text-xs font-bold text-black/60 transition hover:bg-black/[.03]">Cancel</button>
+                      <button type="submit" disabled={profileSubmitting} className="rounded-xl bg-[#756FB8] px-4 py-2.5 text-xs font-bold text-white transition hover:bg-[#625CA4] disabled:opacity-50">{profileSubmitting ? "Saving..." : "Save changes"}</button>
+                    </div>
+                  </form> : profileAction === "password" ? <form onSubmit={changePassword}>
+                    <h3 className="text-sm font-extrabold">Change password</h3>
+                    <div className="mt-5 space-y-4">
+                      <label className="block"><span className="mb-2 block text-[11px] font-semibold text-black/45">Current password</span><input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required autoComplete="current-password" className="h-11 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
+                      <label className="block"><span className="mb-2 block text-[11px] font-semibold text-black/45">New password</span><input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required minLength={8} maxLength={128} autoComplete="new-password" className="h-11 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
+                      <label className="block"><span className="mb-2 block text-[11px] font-semibold text-black/45">Confirm new password</span><input type="password" value={confirmNewPassword} onChange={(event) => setConfirmNewPassword(event.target.value)} required minLength={8} maxLength={128} autoComplete="new-password" className="h-11 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
+                    </div>
+                    <ul className="mt-3 space-y-1 text-[11px]" aria-label="Password requirements">
+                      {getPasswordRequirements(newPassword).map(([requirement, met]) => <li key={requirement} className={met ? "font-semibold text-emerald-700" : "text-black/45"}>{met ? "✓" : "○"} {requirement}</li>)}
+                    </ul>
+                    {profileError && <p role="alert" className="mt-4 text-xs font-semibold text-rose-600">{profileError}</p>}
+                    <div className="mt-5 flex justify-end gap-2">
+                      <button type="button" onClick={() => { setProfileAction(""); setProfileError(""); }} className="rounded-xl border border-black/10 px-4 py-2.5 text-xs font-bold text-black/60 transition hover:bg-black/[.03]">Cancel</button>
+                      <button type="submit" disabled={profileSubmitting} className="rounded-xl bg-[#756FB8] px-4 py-2.5 text-xs font-bold text-white transition hover:bg-[#625CA4] disabled:opacity-50">{profileSubmitting ? "Updating..." : "Update password"}</button>
+                    </div>
+                  </form> : <>
+                    <h3 className="text-sm font-extrabold">Account information</h3>
+                    <dl className="mt-5 space-y-4">
+                      <div><dt className="text-[11px] font-semibold text-black/40">Full name</dt><dd className="mt-1 text-sm font-bold">{user.name}</dd></div>
+                      <div><dt className="text-[11px] font-semibold text-black/40">Email address</dt><dd className="mt-1 break-all text-sm font-bold">{user.email}</dd></div>
+                    </dl>
+                    <p className="mt-6 rounded-xl bg-[#F8F6F3] p-4 text-xs leading-5 text-black/50">Your verified email is used to sign in and cannot be changed here.</p>
+                    {profileMessage && <p role="status" className="mt-4 text-xs font-semibold text-emerald-700">{profileMessage}</p>}
+                  </>}
                 </div>
               </div>
             )}
@@ -1495,87 +1588,6 @@ function Dashboard({ user, onHome, onSignOut }) {
                 className="rounded-xl bg-[#756FB8] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#625CA4]"
               >
                 Done
-              </button>
-            </div>
-          </section>
-        </div>
-      )}
-      {comparisonModeOpen && (
-        <div
-          className="fixed inset-0 z-[70] grid place-items-center bg-[#2D3142]/65 p-4 backdrop-blur-sm"
-          onMouseDown={(event) => event.target === event.currentTarget && setComparisonModeOpen(false)}
-          onKeyDown={(event) => event.key === "Escape" && setComparisonModeOpen(false)}
-        >
-          <section
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="analytics-comparison-title"
-            className="w-full max-w-md rounded-3xl bg-white p-7 shadow-2xl"
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <p className="text-xs font-bold uppercase tracking-[.15em] text-[#756FB8]">Analytics overview</p>
-                <h2 id="analytics-comparison-title" className="mt-2 text-xl font-extrabold">Comparison Mode</h2>
-                <p className="mt-2 text-sm leading-6 text-black/50">Choose at least two events to compare their tickets, registrations, check-ins, and revenue.</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setComparisonModeOpen(false)}
-                aria-label="Close comparison mode settings"
-                className="rounded-xl bg-black/[.04] p-2 text-black/50 transition hover:bg-black/[.08]"
-              >
-                <Icon name="close" />
-              </button>
-            </div>
-            <div className="mt-6 max-h-72 space-y-2 overflow-y-auto">
-              {analyticsTabEvents.map((event) => {
-                const isSelected = comparisonEventDraft.includes(event.eventCode);
-                return <label key={event.eventCode} className="flex cursor-pointer items-center gap-3 rounded-xl border border-black/[.06] px-4 py-3 transition hover:bg-[#F8F6F3]">
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={() => setComparisonEventDraft((current) => isSelected
-                      ? current.filter((eventCode) => eventCode !== event.eventCode)
-                      : [...current, event.eventCode])}
-                    className="size-4 accent-[#756FB8]"
-                  />
-                  <span className="min-w-0 flex-1 truncate text-sm font-semibold">{event.name}</span>
-                  {event.status === "Finished" && <span className="text-[10px] font-bold uppercase text-black/35">Finished</span>}
-                  {event.status === "Cancelled" && <span className="text-[10px] font-bold uppercase text-black/35">Cancelled</span>}
-                </label>;
-              })}
-              {analyticsTabEvents.length === 0 && <p className="rounded-xl bg-[#F8F6F3] p-4 text-sm text-black/45">Publish events to compare them here.</p>}
-            </div>
-            <p className="mt-3 text-xs text-black/40">{comparisonEventDraft.length} selected · choose at least 2 events</p>
-            <div className="mt-7 flex flex-wrap justify-end gap-3">
-              {comparisonEventCodes.length > 0 && <button
-                type="button"
-                onClick={() => {
-                  setComparisonEventCodes([]);
-                  setComparisonModeOpen(false);
-                }}
-                className="mr-auto rounded-xl px-4 py-3 text-sm font-bold text-rose-600 transition hover:bg-rose-50"
-              >
-                Clear comparison
-              </button>}
-              <button
-                type="button"
-                onClick={() => setComparisonModeOpen(false)}
-                className="rounded-xl border border-black/10 px-4 py-3 text-sm font-bold text-black/60 transition hover:bg-black/[.03]"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={comparisonEventDraft.length < 2}
-                onClick={() => {
-                  setComparisonEventCodes(comparisonEventDraft);
-                  setAnalyticsEventTab("overview");
-                  setComparisonModeOpen(false);
-                }}
-                className="rounded-xl bg-[#756FB8] px-4 py-3 text-sm font-bold text-white transition hover:bg-[#625CA4] disabled:cursor-not-allowed disabled:opacity-45"
-              >
-                Compare events
               </button>
             </div>
           </section>
@@ -2003,5 +2015,5 @@ export default function App() {
 
   return screen === "landing"
     ? <Landing onEnter={enterDashboard} initialError={sessionError} />
-    : <Dashboard user={user} onHome={() => setScreen("landing")} onSignOut={signOut} />;
+    : <Dashboard user={user} onHome={() => setScreen("landing")} onSignOut={signOut} onUserUpdate={setUser} />;
 }

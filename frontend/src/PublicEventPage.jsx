@@ -10,6 +10,7 @@ export default function PublicEventPage({ eventCode }) {
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [discoverySource, setDiscoverySource] = useState("");
   const [ticketTypeId, setTicketTypeId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
@@ -89,7 +90,7 @@ export default function PublicEventPage({ eventCode }) {
     try {
       const result = await api(`/public/events/${encodeURIComponent(eventCode)}/register`, {
         method: "POST",
-        body: JSON.stringify({ name, email, ticketTypeId: activeTicketId }),
+        body: JSON.stringify({ name, email, discoverySource, ticketTypeId: activeTicketId }),
       });
       if (result.checkoutUrl) {
         window.location.assign(result.checkoutUrl);
@@ -101,6 +102,7 @@ export default function PublicEventPage({ eventCode }) {
         : "Registration confirmed. Your confirmation email is pending delivery; please check your spam folder if it does not arrive soon.");
       setName("");
       setEmail("");
+      setDiscoverySource("");
     } catch (requestError) {
       setError(requestError.message);
     } finally {
@@ -151,6 +153,7 @@ export default function PublicEventPage({ eventCode }) {
               <p className="rounded-xl bg-[#F8F6F3] px-3 py-2 text-xs text-black/55">Registration is limited to one ticket per person.</p>
               <label className="block"><span className="mb-2 block text-xs font-bold">Full name <span className="text-rose-600">*</span></span><input value={name} onChange={(input) => setName(input.target.value)} required maxLength={120} autoComplete="name" className="h-12 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
               <label className="block"><span className="mb-2 block text-xs font-bold">Email <span className="text-rose-600">*</span></span><input type="email" value={email} onChange={(input) => setEmail(input.target.value)} required maxLength={254} autoComplete="email" className="h-12 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
+              <label className="block"><span className="mb-2 block text-xs font-bold">Where did you hear about this event? <span className="text-rose-600">*</span></span><input value={discoverySource} onChange={(input) => setDiscoverySource(input.target.value)} required maxLength={200} autoComplete="off" placeholder="e.g. Social media, a friend, or an ad" className="h-12 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
               {selectedTicket && <div className="flex justify-between border-t border-black/[.07] pt-4 text-sm"><span className="text-black/50">Total</span><strong>{formatPrice(selectedTicket.priceCents)}</strong></div>}
               {error && <p role="alert" className="text-xs leading-5 text-rose-600">{error}</p>}
               {message && <p role="status" className="text-xs leading-5 text-emerald-700">{message}</p>}
