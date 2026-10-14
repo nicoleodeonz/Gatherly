@@ -312,8 +312,11 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
   const [profileAction, setProfileAction] = useState("");
   const [profileName, setProfileName] = useState(user.name);
   const [currentPassword, setCurrentPassword] = useState("");
+  const [currentPasswordCheck, setCurrentPasswordCheck] = useState({ state: "empty", value: "", message: "" });
   const [newPassword, setNewPassword] = useState("");
+  const [newPasswordCheck, setNewPasswordCheck] = useState({ state: "empty", value: "", message: "" });
   const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [passwordVisibility, setPasswordVisibility] = useState({ current: false, new: false, confirm: false });
   const [profileError, setProfileError] = useState("");
   const [profileMessage, setProfileMessage] = useState("");
   const [profileSubmitting, setProfileSubmitting] = useState(false);
@@ -362,6 +365,83 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
     const intervalId = window.setInterval(updateCurrentTime, 60000);
     return () => window.clearInterval(intervalId);
   }, []);
+
+  useEffect(() => {
+    if (profileAction !== "password" || !currentPassword) {
+      return undefined;
+    }
+
+    let activeRequest = true;
+    const timeoutId = window.setTimeout(() => {
+      api("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email: user.email, password: currentPassword }),
+      }).then(() => {
+        if (activeRequest) {
+          setCurrentPasswordCheck({
+            state: "valid",
+            value: currentPassword,
+            message: "Current password is correct.",
+          });
+        }
+      }).catch((error) => {
+        if (activeRequest) {
+          if (error.status === 401) {
+            setCurrentPasswordCheck({
+              state: "invalid",
+              value: currentPassword,
+              message: "This does not match your current password.",
+            });
+          } else {
+            setCurrentPasswordCheck({ state: "error", value: currentPassword, message: error.message });
+          }
+        }
+      });
+    }, 350);
+
+    return () => {
+      activeRequest = false;
+      window.clearTimeout(timeoutId);
+    };
+  }, [currentPassword, profileAction, user.email]);
+
+  useEffect(() => {
+    if (profileAction !== "password" || !newPassword || !getPasswordRequirements(newPassword).every(([, met]) => met)) {
+      return undefined;
+    }
+
+    let activeRequest = true;
+    const timeoutId = window.setTimeout(() => {
+      api("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email: user.email, password: newPassword }),
+      }).then(() => {
+        if (activeRequest) {
+          setNewPasswordCheck({
+            state: "same",
+            value: newPassword,
+            message: "New password must be different from your current password.",
+          });
+        }
+      }).catch((error) => {
+        if (!activeRequest) return;
+        if (error.status === 401) {
+          setNewPasswordCheck({
+            state: "different",
+            value: newPassword,
+            message: "New password is different from your current password.",
+          });
+        } else {
+          setNewPasswordCheck({ state: "error", value: newPassword, message: error.message });
+        }
+      });
+    }, 350);
+
+    return () => {
+      activeRequest = false;
+      window.clearTimeout(timeoutId);
+    };
+  }, [newPassword, profileAction, user.email]);
 
   useEffect(() => {
     let activeRequest = true;
@@ -458,31 +538,11 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
         priceCents: Math.round(Number(ticket.price) * 100),
       })) : [],
     };
-    if (editingEvent) {
-      setActionConfirmation({ type: "save", event: selectedEvent, values });
-      return;
-    }
-    try {
-      const created = await api("/events", { method: "POST", body: JSON.stringify(values) });
-      setEvents((current) => [created, ...current]);
-      setNotice("Event created and saved as a draft.");
-      setModalOpen(false);
-      setEditingEvent(null);
-      setEventFormStep(1);
-      setEventFormBasics({});
-      setMultipleDay(false);
-      setPricingMode("free");
-      setEventPrice("");
-      setTicketTypes([{ id: "", name: "General Admission", price: "" }, { id: "", name: "VIP", price: "" }]);
-      setEventStartDate("");
-      setEventEndDate("");
-      setVenueInput("");
-      setVenueSelected(false);
-      setVenueSuggestions([]);
-    } catch (error) {
-      setNotice(error.message);
-    }
-    window.setTimeout(() => setNotice(""), 3200);
+    setActionConfirmation({
+      type: editingEvent ? "save" : "create",
+      event: selectedEvent || { name: values.name },
+      values,
+    });
   }
 
   async function confirmEventAction() {
@@ -499,6 +559,30 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
         const updated = await api(`/events/${event.id}/finish`, { method: "PATCH" });
         setEvents((current) => current.map((item) => item.id === updated.id ? updated : item));
         setNotice("Event marked as finished.");
+      } else if (type === "publish") {
+        const updated = await api(`/events/${event.id}/publish`, { method: "PATCH" });
+        setEvents((current) => current.map((item) => item.id === updated.id ? updated : item));
+        setNotice("Event published and is now on sale.");
+      } else if (type === "create") {
+        const created = await api("/events", {
+          method: "POST",
+          body: JSON.stringify(actionConfirmation.values),
+        });
+        setEvents((current) => [created, ...current]);
+        setNotice("Event created and saved as a draft.");
+        setModalOpen(false);
+        setEditingEvent(null);
+        setEventFormStep(1);
+        setEventFormBasics({});
+        setMultipleDay(false);
+        setPricingMode("free");
+        setEventPrice("");
+        setTicketTypes([{ id: "", name: "General Admission", price: "" }, { id: "", name: "VIP", price: "" }]);
+        setEventStartDate("");
+        setEventEndDate("");
+        setVenueInput("");
+        setVenueSelected(false);
+        setVenueSuggestions([]);
       } else if (type === "save") {
         const updated = await api(`/events/${event.id}`, {
           method: "PATCH",
@@ -520,15 +604,8 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
     window.setTimeout(() => setNotice(""), 3200);
   }
 
-  async function publishEvent(event) {
-    try {
-      const updated = await api(`/events/${event.id}/publish`, { method: "PATCH" });
-      setEvents((current) => current.map((item) => item.id === updated.id ? updated : item));
-      setNotice("Event published and is now on sale.");
-    } catch (error) {
-      setNotice(error.message);
-    }
-    window.setTimeout(() => setNotice(""), 3200);
+  function publishEvent(event) {
+    setActionConfirmation({ type: "publish", event });
   }
 
   async function toggleAttendee(person) {
@@ -615,10 +692,12 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
     try {
       const result = await api("/auth/change-password", {
         method: "POST",
-        body: JSON.stringify({ currentPassword, newPassword }),
+        body: JSON.stringify({ currentPassword, newPassword, confirmNewPassword }),
       });
       setCurrentPassword("");
+      setCurrentPasswordCheck({ state: "empty", value: "", message: "" });
       setNewPassword("");
+      setNewPasswordCheck({ state: "empty", value: "", message: "" });
       setConfirmNewPassword("");
       setProfileAction("");
       setProfileMessage(result.message);
@@ -1159,7 +1238,7 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
                       <td className="px-4 py-4"><span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold ${event.status === "On sale" ? "bg-emerald-50 text-emerald-700" : "bg-black/[.05] text-black/45"}`}><span className={`size-1.5 rounded-full ${event.status === "On sale" ? "bg-emerald-500" : "bg-black/30"}`} />{event.status}</span></td>
                       <td className="px-6 py-4"><div className="flex justify-center gap-1">
                         {!archiveView && event.status === "Draft" && <button onClick={() => publishEvent(event)} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50">Publish</button>}
-                        {event.status === "On sale" && event.eventCode && <button onClick={async () => { try { await navigator.clipboard.writeText(`${window.location.origin}/events/${event.eventCode}`); setNotice("Public event link copied."); } catch { setNotice("Unable to copy the event link. Open the event page and copy its URL."); } window.setTimeout(() => setNotice(""), 3200); }} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50">Copy link</button>}
+                        {event.status === "On sale" && event.eventCode && <button onClick={async () => { try { await navigator.clipboard.writeText(event.registrationUrl || `${window.location.origin}/events/${event.eventCode}`); setNotice("Public event link copied."); } catch { setNotice("Unable to copy the event link. Open the event page and copy its URL."); } window.setTimeout(() => setNotice(""), 3200); }} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-emerald-700 hover:bg-emerald-50">Copy link</button>}
                         {!archiveView && <button onClick={() => { setEditingEvent(event.id); setEventFormStep(1); setEventFormBasics({}); setMultipleDay(event.multipleDay === true); setPricingMode(event.pricingMode || "free"); setEventPrice(event.priceCents ? (event.priceCents / 100).toFixed(2) : ""); setTicketTypes(event.ticketTypes?.length ? event.ticketTypes.map((ticket) => ({ id: ticket.id, name: ticket.name, price: (ticket.priceCents / 100).toFixed(2) })) : [{ id: "", name: "General Admission", price: "" }, { id: "", name: "VIP", price: "" }]); setEventStartDate(toDateInputValue(event.date)); setEventEndDate(event.endDate || ""); setVenueInput(event.venue); setVenueSelected(true); setVenueSuggestions([]); setVenueSuggestionError(""); setModalOpen(true); }} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-[#756FB8] hover:bg-[#E7E6F2]">Edit</button>}
                         {event.status === "On sale" && <button disabled={!hasEventEnded(event)} title={hasEventEnded(event) ? "Mark this event as finished" : "Available after the event end date and time"} onClick={() => setActionConfirmation({ type: "finish", event })} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-40">Finish</button>}
                         {!archiveView && !hasEventStartDatePassed(event, currentTime) && <button onClick={() => setActionConfirmation({ type: "cancel", event })} className="rounded-lg px-2.5 py-2 text-[10px] font-bold text-rose-600 hover:bg-rose-50">Cancel</button>}
@@ -1282,7 +1361,7 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setProfileAction("password"); setCurrentPassword(""); setNewPassword(""); setConfirmNewPassword(""); setProfileError(""); setProfileMessage(""); }}
+                    onClick={() => { setProfileAction("password"); setCurrentPassword(""); setCurrentPasswordCheck({ state: "empty", value: "", message: "" }); setNewPassword(""); setNewPasswordCheck({ state: "empty", value: "", message: "" }); setConfirmNewPassword(""); setProfileError(""); setProfileMessage(""); }}
                     className="rounded-xl bg-[#756FB8] px-3 py-2 text-xs font-bold text-white transition hover:bg-[#625CA4]"
                   >
                     Change password
@@ -1325,17 +1404,80 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
                   </form> : profileAction === "password" ? <form onSubmit={changePassword}>
                     <h3 className="text-sm font-extrabold">Change password</h3>
                     <div className="mt-5 space-y-4">
-                      <label className="block"><span className="mb-2 block text-[11px] font-semibold text-black/45">Current password</span><input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required autoComplete="current-password" className="h-11 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
-                      <label className="block"><span className="mb-2 block text-[11px] font-semibold text-black/45">New password</span><input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required minLength={8} maxLength={128} autoComplete="new-password" className="h-11 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
-                      <label className="block"><span className="mb-2 block text-[11px] font-semibold text-black/45">Confirm new password</span><input type="password" value={confirmNewPassword} onChange={(event) => setConfirmNewPassword(event.target.value)} required minLength={8} maxLength={128} autoComplete="new-password" className="h-11 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
+                      {[
+                        ["current", "Current password", currentPassword, setCurrentPassword, "current-password", false],
+                        ["new", "New password", newPassword, setNewPassword, "new-password", true],
+                        ["confirm", "Confirm new password", confirmNewPassword, setConfirmNewPassword, "new-password", true],
+                      ].map(([key, label, value, setValue, autoComplete, validate]) => <label key={key} className="block">
+                        <span className="mb-2 block text-[11px] font-semibold text-black/45">{label}</span>
+                        <span className="relative block">
+                          <input
+                            type={passwordVisibility[key] ? "text" : "password"}
+                            value={value}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setValue(value);
+                              if (key === "current") {
+                                setCurrentPasswordCheck({
+                                  state: value ? "checking" : "empty",
+                                  value,
+                                  message: value ? "Checking current password..." : "",
+                                });
+                              } else if (key === "new") {
+                                const meetsRequirements = getPasswordRequirements(value).every(([, met]) => met);
+                                setNewPasswordCheck({
+                                  state: !value ? "empty" : meetsRequirements ? "checking" : "incomplete",
+                                  value,
+                                  message: !value
+                                    ? ""
+                                    : meetsRequirements
+                                      ? "Checking against your current password..."
+                                      : "Complete the password requirements to check it.",
+                                });
+                              }
+                            }}
+                            required
+                            {...(validate ? { minLength: 8, maxLength: 128 } : {})}
+                            autoComplete={autoComplete}
+                            className="h-11 w-full rounded-xl border border-black/10 px-3 pr-11 text-sm outline-none focus:border-[#756FB8]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setPasswordVisibility((current) => ({ ...current, [key]: !current[key] }))}
+                            aria-label={`${passwordVisibility[key] ? "Hide" : "Show"} ${label.toLowerCase()}`}
+                            aria-pressed={passwordVisibility[key]}
+                            className="absolute inset-y-0 right-0 grid w-11 place-items-center text-black/40 transition hover:text-[#625CA4]"
+                          >
+                            <Icon name={passwordVisibility[key] ? "eyeOff" : "eye"} className="size-[18px]" />
+                          </button>
+                        </span>
+                        {key === "current" && currentPasswordCheck.value === currentPassword && currentPasswordCheck.message && <span
+                          role={currentPasswordCheck.state === "invalid" || currentPasswordCheck.state === "error" ? "alert" : "status"}
+                          className={`mt-1.5 block text-[11px] font-semibold ${currentPasswordCheck.state === "valid" ? "text-emerald-700" : currentPasswordCheck.state === "checking" ? "text-black/40" : "text-rose-600"}`}
+                        >
+                          {currentPasswordCheck.message}
+                        </span>}
+                        {key === "confirm" && confirmNewPassword && <span
+                          role={newPassword === confirmNewPassword ? "status" : "alert"}
+                          className={`mt-1.5 block text-[11px] font-semibold ${newPassword === confirmNewPassword ? "text-emerald-700" : "text-rose-600"}`}
+                        >
+                          {newPassword === confirmNewPassword ? "Passwords match." : "Passwords do not match."}
+                        </span>}
+                      </label>)}
                     </div>
+                    {newPasswordCheck.value === newPassword && newPasswordCheck.message && <p
+                      role={newPasswordCheck.state === "same" || newPasswordCheck.state === "error" ? "alert" : "status"}
+                      className={`mt-2 text-[11px] font-semibold ${newPasswordCheck.state === "different" ? "text-emerald-700" : newPasswordCheck.state === "checking" || newPasswordCheck.state === "incomplete" ? "text-black/40" : "text-rose-600"}`}
+                    >
+                      {newPasswordCheck.message}
+                    </p>}
                     <ul className="mt-3 space-y-1 text-[11px]" aria-label="Password requirements">
                       {getPasswordRequirements(newPassword).map(([requirement, met]) => <li key={requirement} className={met ? "font-semibold text-emerald-700" : "text-black/45"}>{met ? "✓" : "○"} {requirement}</li>)}
                     </ul>
                     {profileError && <p role="alert" className="mt-4 text-xs font-semibold text-rose-600">{profileError}</p>}
                     <div className="mt-5 flex justify-end gap-2">
                       <button type="button" onClick={() => { setProfileAction(""); setProfileError(""); }} className="rounded-xl border border-black/10 px-4 py-2.5 text-xs font-bold text-black/60 transition hover:bg-black/[.03]">Cancel</button>
-                      <button type="submit" disabled={profileSubmitting} className="rounded-xl bg-[#756FB8] px-4 py-2.5 text-xs font-bold text-white transition hover:bg-[#625CA4] disabled:opacity-50">{profileSubmitting ? "Updating..." : "Update password"}</button>
+                      <button type="submit" disabled={profileSubmitting || currentPasswordCheck.state !== "valid" || currentPasswordCheck.value !== currentPassword || newPasswordCheck.state !== "different" || newPasswordCheck.value !== newPassword || !confirmNewPassword || newPassword !== confirmNewPassword} className="rounded-xl bg-[#756FB8] px-4 py-2.5 text-xs font-bold text-white transition hover:bg-[#625CA4] disabled:cursor-not-allowed disabled:opacity-50">{profileSubmitting ? "Updating..." : "Update password"}</button>
                     </div>
                   </form> : <>
                     <h3 className="text-sm font-extrabold">Account information</h3>
@@ -1419,9 +1561,6 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
             aria-labelledby="logout-confirm-title"
             className="w-full max-w-sm rounded-3xl bg-white p-7 shadow-2xl"
           >
-            <div className="grid size-12 place-items-center rounded-2xl bg-[#E7E6F2] text-[#756FB8]">
-              <Icon name="close" />
-            </div>
             <h2 id="logout-confirm-title" className="mt-5 text-xl font-extrabold">Log out of Gatherly?</h2>
             <p className="mt-2 text-sm leading-6 text-black/50">You’ll need to sign in again to access your organizer workspace.</p>
             <div className="mt-7 flex justify-end gap-3">
@@ -1495,21 +1634,34 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
             aria-describedby="event-action-description"
             className="w-full max-w-sm rounded-3xl bg-white p-7 shadow-2xl"
           >
-            <div className={`grid size-12 place-items-center rounded-2xl ${actionConfirmation.type === "cancel" ? "bg-rose-50 text-rose-600" : "bg-[#E7E6F2] text-[#756FB8]"}`}>
-              <Icon name="close" />
+            <div className={`grid size-12 place-items-center rounded-2xl ${actionConfirmation.type === "cancel" ? "bg-rose-50 text-rose-600" : actionConfirmation.type === "publish" ? "bg-emerald-50 text-emerald-700" : "bg-[#E7E6F2] text-[#756FB8]"}`}>
+              <Icon name={actionConfirmation.type === "cancel" ? "close" : "check"} />
             </div>
             <h2 id="event-action-title" className="mt-5 text-xl font-extrabold">
-              {actionConfirmation.type === "cancel" ? "Cancel this event?" : actionConfirmation.type === "finish" ? "Finish this event?" : "Save event changes?"}
+              {actionConfirmation.type === "cancel"
+                ? "Cancel this event?"
+                : actionConfirmation.type === "finish"
+                  ? "Finish this event?"
+                  : actionConfirmation.type === "publish"
+                    ? "Publish this event?"
+                    : actionConfirmation.type === "create"
+                      ? "Create this event?"
+                      : "Save event changes?"}
             </h2>
             <p id="event-action-description" className="mt-2 text-sm leading-6 text-black/50">
               {actionConfirmation.type === "cancel"
                 ? `Cancel “${actionConfirmation.event.name}”? It will be removed from public registration and moved to the archive. Existing orders and attendee records will be kept.`
                 : actionConfirmation.type === "finish"
                   ? `Mark “${actionConfirmation.event.name}” as finished? Its public registration page will no longer be available.`
-                  : `Save your changes to “${actionConfirmation.event.name}”?`}
+                  : actionConfirmation.type === "publish"
+                    ? `Publish “${actionConfirmation.event.name}”? It will be available publicly for ticket registration.`
+                    : actionConfirmation.type === "create"
+                      ? `Create “${actionConfirmation.event.name}” and save it as a draft? You can publish it later from your events list.`
+                      : `Save your changes to “${actionConfirmation.event.name}”?`}
             </p>
             <div className="mt-7 flex justify-end gap-3">
               <button
+                type="button"
                 onClick={() => setActionConfirmation(null)}
                 disabled={actionSubmitting}
                 className="rounded-xl border border-black/10 px-4 py-3 text-sm font-bold text-black/55 transition hover:bg-black/[.03] disabled:opacity-50"
@@ -1517,13 +1669,30 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
                 Cancel
               </button>
               <button
+                type="button"
                 onClick={confirmEventAction}
                 disabled={actionSubmitting}
-                className={`rounded-xl px-4 py-3 text-sm font-bold text-white transition disabled:cursor-not-allowed disabled:opacity-50 ${actionConfirmation.type === "cancel" ? "bg-rose-600 hover:bg-rose-700" : "bg-[#756FB8] hover:bg-[#625CA4]"}`}
+                className={`rounded-xl px-4 py-3 text-sm font-bold text-white transition disabled:cursor-not-allowed disabled:opacity-50 ${actionConfirmation.type === "cancel" ? "bg-rose-600 hover:bg-rose-700" : actionConfirmation.type === "publish" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-[#756FB8] hover:bg-[#625CA4]"}`}
               >
                 {actionSubmitting
-                  ? actionConfirmation.type === "cancel" ? "Cancelling..." : actionConfirmation.type === "finish" ? "Finishing..." : "Saving..."
-                  : actionConfirmation.type === "cancel" ? "Cancel event" : actionConfirmation.type === "finish" ? "Finish event" : "Save changes"}
+                  ? actionConfirmation.type === "cancel"
+                    ? "Cancelling..."
+                    : actionConfirmation.type === "finish"
+                      ? "Finishing..."
+                      : actionConfirmation.type === "publish"
+                        ? "Publishing..."
+                        : actionConfirmation.type === "create"
+                          ? "Creating..."
+                          : "Saving..."
+                  : actionConfirmation.type === "cancel"
+                    ? "Cancel event"
+                    : actionConfirmation.type === "finish"
+                      ? "Finish event"
+                      : actionConfirmation.type === "publish"
+                        ? "Publish event"
+                        : actionConfirmation.type === "create"
+                          ? "Create event"
+                          : "Save changes"}
               </button>
             </div>
           </section>
@@ -1614,7 +1783,20 @@ function Landing({ onEnter, initialError }) {
   const [authOpen, setAuthOpen] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
+  const [forgotPassword, setForgotPassword] = useState(false);
+  const [resetCodeSent, setResetCodeSent] = useState(false);
+  const [resetCodeVerified, setResetCodeVerified] = useState(false);
+  const [resetCode, setResetCode] = useState("");
+  const [resetToken, setResetToken] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetPasswordConfirmation, setResetPasswordConfirmation] = useState("");
+  const [resetPasswordVisibility, setResetPasswordVisibility] = useState({ new: false, confirm: false });
+  const [resetError, setResetError] = useState("");
+  const [resetMessage, setResetMessage] = useState("");
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetResendSeconds, setResetResendSeconds] = useState(0);
   const [password, setPassword] = useState("");
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [registrationName, setRegistrationName] = useState("");
@@ -1636,6 +1818,12 @@ function Landing({ onEnter, initialError }) {
     const timeout = window.setTimeout(() => setResendSeconds((seconds) => Math.max(0, seconds - 1)), 1000);
     return () => window.clearTimeout(timeout);
   }, [verificationOpen, resendSeconds]);
+
+  useEffect(() => {
+    if (!forgotPassword || !resetCodeSent || resetResendSeconds <= 0) return undefined;
+    const timeout = window.setTimeout(() => setResetResendSeconds((seconds) => Math.max(0, seconds - 1)), 1000);
+    return () => window.clearTimeout(timeout);
+  }, [forgotPassword, resetCodeSent, resetResendSeconds]);
 
   useEffect(() => {
     const normalizedEmail = email.trim().toLowerCase();
@@ -1779,6 +1967,85 @@ function Landing({ onEnter, initialError }) {
     }
   }
 
+  async function requestPasswordReset(event) {
+    event?.preventDefault();
+    setResetError("");
+    setResetMessage("");
+    setResetLoading(true);
+    try {
+      const result = await api("/auth/password-reset/send", {
+        method: "POST",
+        body: JSON.stringify({ email }),
+      });
+      setResetCodeSent(true);
+      setResetCodeVerified(false);
+      setResetCode("");
+      setResetToken("");
+      setResetResendSeconds(60);
+      setResetMessage(result.message);
+    } catch (error) {
+      if (error.retryAfterSeconds) setResetResendSeconds(error.retryAfterSeconds);
+      setResetError(error.message);
+    } finally {
+      setResetLoading(false);
+    }
+  }
+
+  async function verifyPasswordResetCode(event) {
+    event.preventDefault();
+    setResetError("");
+    setResetLoading(true);
+    try {
+      const result = await api("/auth/password-reset/verify", {
+        method: "POST",
+        body: JSON.stringify({ email, code: resetCode }),
+      });
+      setResetToken(result.resetToken);
+      setResetCodeVerified(true);
+      setResetCode("");
+      setResetMessage("Recovery code verified.");
+    } catch (error) {
+      setResetError(error.message);
+    } finally {
+      setResetLoading(false);
+    }
+  }
+
+  async function completePasswordReset(event) {
+    event.preventDefault();
+    setResetError("");
+    setResetMessage("");
+    if (resetPassword !== resetPasswordConfirmation) {
+      setResetError("The new passwords do not match.");
+      return;
+    }
+    setResetLoading(true);
+    try {
+      const result = await api("/auth/password-reset/complete", {
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          resetToken,
+          newPassword: resetPassword,
+          confirmNewPassword: resetPasswordConfirmation,
+        }),
+      });
+      setAuthMessage(result.message);
+      setForgotPassword(false);
+      setResetCodeSent(false);
+      setResetCodeVerified(false);
+      setResetCode("");
+      setResetToken("");
+      setResetPassword("");
+      setResetPasswordConfirmation("");
+      setPassword("");
+    } catch (error) {
+      setResetError(error.message);
+    } finally {
+      setResetLoading(false);
+    }
+  }
+
   return (
     <div className="landing-page min-h-screen overflow-hidden bg-[#FAF7F2] text-[#2D3142]">
       <section className="relative overflow-hidden bg-[#6670B8] px-4 pb-20 pt-4 text-white sm:px-6 lg:pb-28">
@@ -1853,7 +2120,7 @@ function Landing({ onEnter, initialError }) {
             </div>
           </div>
           <div className="absolute -right-8 bottom-16 hidden w-56 rotate-3 rounded-2xl bg-white p-4 text-[#2D3142] shadow-2xl lg:block">
-            <div className="flex items-center gap-3"><div className="grid size-9 place-items-center rounded-full bg-[#E8E3F1] text-xs font-bold text-[#756DB4]">NM</div><div><p className="text-xs font-extrabold">Nicole Macalalad</p><p className="text-[9px] text-black/40">New order · #PH1048</p></div></div>
+            <div className="flex items-center gap-3"><div className="grid size-9 place-items-center rounded-full bg-[#E8E3F1] text-xs font-bold text-[#756DB4]">NM</div><div><p className="text-xs font-extrabold">Jane Doe</p><p className="text-[9px] text-black/40">New order · #PH1048</p></div></div>
             <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-black/5"><div className="h-full w-4/5 rounded-full bg-[#6670B8]" /></div>
           </div>
         </div>
@@ -1905,8 +2172,41 @@ function Landing({ onEnter, initialError }) {
         <div className="fixed inset-0 z-50 grid place-items-center bg-[#252938]/70 p-4 backdrop-blur-sm" onMouseDown={(e) => e.target === e.currentTarget && setAuthOpen(false)}>
           <div className="w-full max-w-md rounded-[28px] bg-white p-7 shadow-2xl">
             <div className="flex items-start justify-between"><Brand /><button onClick={() => setAuthOpen(false)} className="rounded-full bg-black/5 p-2" aria-label="Close"><Icon name="close" /></button></div>
-            <h2 className="mt-8 text-2xl font-extrabold tracking-tight">{registering ? "Create your account" : "Welcome back"}</h2>
-            <p className="mt-2 text-xs leading-5 text-black/45">{registering ? "Start planning your first event in minutes." : "Sign in to continue to your organizer workspace."}</p>
+            <h2 className="mt-8 text-2xl font-extrabold tracking-tight">{forgotPassword ? "Reset your password" : registering ? "Create your account" : "Welcome back"}</h2>
+            <p className="mt-2 text-xs leading-5 text-black/45">{forgotPassword ? "We’ll email you a recovery code if an account exists for that address." : registering ? "Start planning your first event in minutes." : "Sign in to continue to your organizer workspace."}</p>
+            {authMessage && !forgotPassword && !registering && <p role="status" className="mt-4 rounded-xl bg-emerald-50 px-4 py-3 text-xs font-semibold text-emerald-700">{authMessage}</p>}
+            {forgotPassword ? <div className="mt-6 space-y-4">
+              {!resetCodeSent ? <form onSubmit={requestPasswordReset} className="space-y-4">
+                <label className="block"><span className="mb-2 block text-xs font-bold">Email address</span><input required type="email" maxLength={254} value={email} onChange={(event) => { setEmail(event.target.value); setResetError(""); }} className="h-12 w-full rounded-xl border border-black/10 px-4 text-sm outline-none focus:border-[#6670B8]" placeholder="email@gatherly.ph" /></label>
+                {resetError && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-xs font-semibold text-rose-700">{resetError}</p>}
+                <button disabled={resetLoading} className="w-full rounded-xl bg-[#2D3142] py-3.5 text-sm font-bold text-white transition hover:bg-[#6670B8] disabled:cursor-wait disabled:opacity-60">{resetLoading ? "Sending..." : "Send recovery code"}</button>
+              </form> : <>
+                <p role="status" className="rounded-xl bg-emerald-50 px-4 py-3 text-xs leading-5 font-semibold text-emerald-700">{resetMessage}</p>
+                {!resetCodeVerified ? <form onSubmit={verifyPasswordResetCode} className="space-y-4">
+                  <p className="text-xs text-black/50">Enter the six-digit code sent to <span className="font-bold text-[#2D3142]">{email}</span>.</p>
+                  <label className="block"><span className="mb-2 block text-xs font-bold">Recovery code</span><input required inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={resetCode} onChange={(event) => { setResetCode(event.target.value.replace(/\D/g, "").slice(0, 6)); setResetError(""); }} className="h-12 w-full rounded-xl border border-black/10 px-4 text-center text-lg font-bold tracking-[.35em] outline-none focus:border-[#6670B8]" placeholder="000000" /></label>
+                  {resetError && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-xs font-semibold text-rose-700">{resetError}</p>}
+                  <button disabled={resetLoading || resetCode.length !== 6} className="w-full rounded-xl bg-[#2D3142] py-3.5 text-sm font-bold text-white transition hover:bg-[#6670B8] disabled:cursor-not-allowed disabled:opacity-60">{resetLoading ? "Verifying..." : "Verify recovery code"}</button>
+                </form> : <form onSubmit={completePasswordReset} className="space-y-4">
+                  <label className="block"><span className="mb-2 block text-xs font-bold">New password</span><span className="relative block"><input required minLength={8} maxLength={128} type={resetPasswordVisibility.new ? "text" : "password"} autoComplete="new-password" value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} className="h-12 w-full rounded-xl border border-black/10 px-4 pr-12 text-sm outline-none focus:border-[#6670B8]" /><button type="button" onClick={() => setResetPasswordVisibility((current) => ({ ...current, new: !current.new }))} aria-label={`${resetPasswordVisibility.new ? "Hide" : "Show"} new password`} aria-pressed={resetPasswordVisibility.new} className="absolute inset-y-0 right-0 grid w-12 place-items-center rounded-r-xl text-black/45 transition hover:text-[#6670B8]"><Icon name={resetPasswordVisibility.new ? "eyeOff" : "eye"} className="size-[18px]" /></button></span></label>
+                  <ul className="space-y-1 text-[11px]" aria-label="Password requirements">
+                    {getPasswordRequirements(resetPassword).map(([requirement, met]) => <li key={requirement} className={met ? "font-semibold text-emerald-700" : "text-black/45"}>{met ? "✓" : "○"} {requirement}</li>)}
+                  </ul>
+                  <label className="block"><span className="mb-2 block text-xs font-bold">Confirm new password</span><span className="relative block"><input required minLength={8} maxLength={128} type={resetPasswordVisibility.confirm ? "text" : "password"} autoComplete="new-password" value={resetPasswordConfirmation} onChange={(event) => setResetPasswordConfirmation(event.target.value)} className="h-12 w-full rounded-xl border border-black/10 px-4 pr-12 text-sm outline-none focus:border-[#6670B8]" /><button type="button" onClick={() => setResetPasswordVisibility((current) => ({ ...current, confirm: !current.confirm }))} aria-label={`${resetPasswordVisibility.confirm ? "Hide" : "Show"} confirm new password`} aria-pressed={resetPasswordVisibility.confirm} className="absolute inset-y-0 right-0 grid w-12 place-items-center rounded-r-xl text-black/45 transition hover:text-[#6670B8]"><Icon name={resetPasswordVisibility.confirm ? "eyeOff" : "eye"} className="size-[18px]" /></button></span>
+                    {resetPasswordConfirmation && <span role={resetPassword === resetPasswordConfirmation ? "status" : "alert"} className={`mt-1.5 block text-[11px] font-semibold ${resetPassword === resetPasswordConfirmation ? "text-emerald-700" : "text-rose-600"}`}>{resetPassword === resetPasswordConfirmation ? "Passwords match." : "Passwords do not match."}</span>}
+                  </label>
+                  {resetError && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-xs font-semibold text-rose-700">{resetError}</p>}
+                  <button disabled={resetLoading || !resetToken || getPasswordRequirements(resetPassword).some(([, met]) => !met) || resetPassword !== resetPasswordConfirmation} className="w-full rounded-xl bg-[#2D3142] py-3.5 text-sm font-bold text-white transition hover:bg-[#6670B8] disabled:cursor-not-allowed disabled:opacity-60">{resetLoading ? "Updating..." : "Reset password"}</button>
+                </form>}
+                <div className="flex justify-between gap-3 text-xs font-bold">
+                  {!resetCodeVerified && <button type="button" disabled={resetLoading || resetResendSeconds > 0} onClick={() => requestPasswordReset()} className="text-[#6670B8] disabled:cursor-not-allowed disabled:opacity-50">
+                    {resetResendSeconds > 0 ? `Resend code in 00:${String(resetResendSeconds).padStart(2, "0")}` : "Resend code"}
+                  </button>}
+                  <button type="button" disabled={resetLoading} onClick={() => { setResetCodeSent(false); setResetCodeVerified(false); setResetCode(""); setResetToken(""); setResetPassword(""); setResetPasswordConfirmation(""); setResetError(""); setResetMessage(""); setResetResendSeconds(0); }} className="text-black/45 disabled:opacity-50">Use a different email</button>
+                </div>
+              </>}
+              <button type="button" onClick={() => { setForgotPassword(false); setResetError(""); setResetMessage(""); setAuthError(""); }} className="w-full text-center text-xs font-bold text-[#6670B8]">Back to sign in</button>
+            </div> : <>
             <form onSubmit={authenticate} className="mt-6 space-y-4">
               {registering && <label className="block"><span className="mb-2 block text-xs font-bold">Full name</span><input name="name" required maxLength={100} value={registrationName} onChange={(event) => setRegistrationName(event.target.value)} className="h-12 w-full rounded-xl border border-black/10 px-4 text-sm outline-none focus:border-[#6670B8]" placeholder="Jane Doe" /></label>}
               <div>
@@ -1927,6 +2227,7 @@ function Landing({ onEnter, initialError }) {
                   </button>
                 </div>
               </div>
+              {!registering && <button type="button" onClick={() => { setForgotPassword(true); setAuthError(""); setAuthMessage(""); setResetError(""); setResetMessage(""); setResetCodeSent(false); setResetCode(""); setResetPassword(""); setResetPasswordConfirmation(""); setPassword(""); }} className="block text-xs font-bold text-[#6670B8] transition hover:text-[#2D3142]">Forgot password?</button>}
               {registering && <ul className="space-y-1 text-[11px]" aria-label="Password requirements">
                 {getPasswordRequirements(password).map(([requirement, met]) => (
                   <li key={requirement} className={met ? "font-semibold text-emerald-700" : "text-black/45"}>{met ? "✓" : "○"} {requirement}</li>
@@ -1935,7 +2236,8 @@ function Landing({ onEnter, initialError }) {
               {authError && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-xs font-semibold text-rose-700">{authError}</p>}
               <button disabled={authLoading || (registering && (!isEmailVerified || emailRegistered))} className="w-full rounded-xl bg-[#2D3142] py-3.5 text-sm font-bold text-white hover:bg-[#6670B8] disabled:cursor-not-allowed disabled:opacity-60">{authLoading ? "Please wait..." : registering ? "Create account" : "Sign in"}</button>
             </form>
-            <button onClick={() => { setRegistering((value) => !value); setAuthError(""); setPassword(""); }} className="mt-5 w-full text-center text-xs font-bold text-[#6670B8]">{registering ? "Already have an account? Sign in" : "New to Gatherly? Create an account"}</button>
+            <button onClick={() => { setRegistering((value) => !value); setAuthError(""); setAuthMessage(""); setPassword(""); }} className="mt-5 w-full text-center text-xs font-bold text-[#6670B8]">{registering ? "Already have an account? Sign in" : "New to Gatherly? Create an account"}</button>
+            </>}
           </div>
         </div>
       )}

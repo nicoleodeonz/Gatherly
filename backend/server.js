@@ -27,6 +27,8 @@ const emailJsTemplateId = "template_gyx5ecm";
 const verificationLifetimeMs = 10 * 60 * 1000;
 const verificationResendDelayMs = 60 * 1000;
 const verificationMaxAttempts = 5;
+const passwordResetLifetimeMs = 10 * 60 * 1000;
+const gatherlyProcessingFeeCents = 2500;
 const eventCodeCharacters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 if (!mongoUri) {
@@ -70,6 +72,8 @@ function getDatabase() {
         await adminAccounts.createIndex({ email: 1 }, { unique: true });
         await database.collection("email_verifications").createIndex({ email: 1 }, { unique: true });
         await database.collection("email_verifications").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+        await database.collection("password_resets").createIndex({ email: 1 }, { unique: true });
+        await database.collection("password_resets").createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
         const adminPasswordFields = await hashPassword(adminPassword);
         await adminAccounts.updateOne(
           { email: adminEmail },
@@ -182,6 +186,10 @@ function serialize(document) {
 
 function createEventCode() {
   return Array.from({ length: 7 }, () => eventCodeCharacters[crypto.randomInt(eventCodeCharacters.length)]).join("");
+}
+
+function getRegistrationUrl(eventCode) {
+  return `${publicAppUrl.replace(/\/+$/, "")}/events/${encodeURIComponent(eventCode)}`;
 }
 
 function objectId(value) {
@@ -571,6 +579,197 @@ app.post("/api/auth/login", async (req, res) => {
   });
 });
 
+app.post("/api/auth/password-reset/send", async (req, res) => {
+  const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ error: "Enter a valid email address." });
+  }
+  if (!emailJsServiceId || !emailJsPublicKey) {
+    return res.status(503).json({ error: "Password recovery is temporarily unavailable. Please try again later." });
+  }
+
+  const resets = req.db.collection("password_resets");
+  const existingReset = await resets.findOne({ email }, { projection: { lastSentAt: 1 } });
+  const now = new Date();
+  if (existingReset?.lastSentAt && now.getTime() - existingReset.lastSentAt.getTime() < verificationResendDelayMs) {
+    const retryAfterSeconds = Math.ceil(
+      (verificationResendDelayMs - (now.getTime() - existingReset.lastSentAt.getTime())) / 1000,
+    );
+    return res.status(429).json({
+      error: `Please wait ${retryAfterSeconds} seconds before requesting another recovery code.`,
+      retryAfterSeconds,
+    });
+  }
+
+  const [adminAccount, customerAccount] = await Promise.all([
+    req.db.collection("admin_accounts").findOne({ email }, { projection: { _id: 1, name: 1 } }),
+    req.db.collection("customer_accounts").findOne({ email }, { projection: { _id: 1, name: 1 } }),
+  ]);
+  const account = adminAccount || customerAccount;
+  const accountType = adminAccount ? "admin" : customerAccount ? "customer" : null;
+  const code = crypto.randomInt(100000, 1000000).toString();
+  const codeHash = hashVerificationCode(email, account ? code : crypto.randomBytes(32).toString("hex"));
+
+  if (account) {
+    try {
+      const payload = {
+        service_id: emailJsServiceId,
+        template_id: emailJsTemplateId,
+        user_id: emailJsPublicKey,
+        template_params: {
+          name: account.name,
+          email,
+          to_email: email,
+          verification_code: code,
+          expires_in: "10 minutes",
+        },
+      };
+      if (emailJsPrivateKey) payload.accessToken = emailJsPrivateKey;
+      const emailResponse = await fetch("https://api.emailjs.com/api/v1.0/email/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!emailResponse.ok) {
+        console.error(`EmailJS password recovery returned HTTP ${emailResponse.status}.`);
+        if (emailResponse.status === 403) {
+          return res.status(503).json({
+            error: "Password recovery email is not configured correctly. Please contact support.",
+          });
+        }
+        return res.status(502).json({ error: "Unable to send the recovery code. Please try again." });
+      }
+    } catch (error) {
+      console.error("EmailJS password recovery request failed:", error);
+      return res.status(502).json({ error: "Unable to send the recovery code. Please try again." });
+    }
+  }
+
+  await resets.updateOne(
+    { email },
+    {
+      $set: {
+        accountType,
+        codeHash,
+        expiresAt: new Date(now.getTime() + passwordResetLifetimeMs),
+        lastSentAt: now,
+        attempts: 0,
+        consumed: false,
+      },
+      $unset: {
+        verifiedAt: "",
+        resetTokenHash: "",
+        resetTokenExpiresAt: "",
+      },
+    },
+    { upsert: true },
+  );
+  res.json({ message: "If an account exists for this email, a recovery code has been sent." });
+});
+
+app.post("/api/auth/password-reset/verify", async (req, res) => {
+  const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  const { code } = req.body || {};
+  if (!isValidEmail(email) || typeof code !== "string" || !/^\d{6}$/.test(code)) {
+    return res.status(400).json({ error: "Enter a valid email address and six-digit recovery code." });
+  }
+
+  const resets = req.db.collection("password_resets");
+  const reset = await resets.findOneAndUpdate(
+    {
+      email,
+      expiresAt: { $gt: new Date() },
+      attempts: { $lt: verificationMaxAttempts },
+      consumed: false,
+      verifiedAt: { $exists: false },
+    },
+    { $inc: { attempts: 1 } },
+    { returnDocument: "after" },
+  );
+  if (!reset || !reset.accountType || !reset.codeHash) {
+    return res.status(400).json({ error: "The recovery code is expired or invalid. Request a new code." });
+  }
+
+  const suppliedHash = Buffer.from(hashVerificationCode(email, code), "hex");
+  const storedHash = Buffer.from(reset.codeHash, "hex");
+  if (suppliedHash.length !== storedHash.length || !crypto.timingSafeEqual(suppliedHash, storedHash)) {
+    return res.status(400).json({ error: "The recovery code is incorrect." });
+  }
+
+  const resetToken = crypto.randomBytes(32).toString("hex");
+  const verified = await resets.updateOne(
+    { _id: reset._id, consumed: false, verifiedAt: { $exists: false }, expiresAt: { $gt: new Date() } },
+    {
+      $set: {
+        verifiedAt: new Date(),
+        resetTokenHash: crypto.createHash("sha256").update(resetToken).digest("hex"),
+        resetTokenExpiresAt: new Date(Date.now() + passwordResetLifetimeMs),
+        expiresAt: new Date(Date.now() + passwordResetLifetimeMs),
+      },
+    },
+  );
+  if (verified.modifiedCount !== 1) {
+    return res.status(400).json({ error: "The recovery code is expired or invalid. Request a new code." });
+  }
+
+  res.json({ resetToken });
+});
+
+app.post("/api/auth/password-reset/complete", async (req, res) => {
+  const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  const { resetToken, newPassword, confirmNewPassword } = req.body || {};
+  if (!isValidEmail(email) || typeof resetToken !== "string" || !/^[a-f0-9]{64}$/i.test(resetToken)
+    || typeof newPassword !== "string" || newPassword.length < 8 || newPassword.length > 128
+    || !hasValidPasswordComplexity(newPassword)
+    || typeof confirmNewPassword !== "string" || newPassword !== confirmNewPassword) {
+    return res.status(400).json({
+      error: "Verify your recovery code, confirm the new password exactly, and meet all password requirements.",
+    });
+  }
+
+  const resets = req.db.collection("password_resets");
+  const resetTokenHash = crypto.createHash("sha256").update(resetToken).digest("hex");
+  const reset = await resets.findOne({
+    email,
+    resetTokenHash,
+    resetTokenExpiresAt: { $gt: new Date() },
+    consumed: false,
+  });
+  if (!reset || !reset.accountType || !reset.codeHash) {
+    return res.status(400).json({ error: "Verify a valid recovery code before resetting your password." });
+  }
+
+  const collectionName = reset.accountType === "admin" ? "admin_accounts" : "customer_accounts";
+  const account = await req.db.collection(collectionName).findOne(
+    { email },
+    { projection: { _id: 1, passwordHash: 1, passwordSalt: 1 } },
+  );
+  if (!account) {
+    return res.status(400).json({ error: "The recovery code is expired or invalid. Request a new code." });
+  }
+  if (await verifyPassword(newPassword, account)) {
+    return res.status(400).json({ error: "Your new password must be different from your current password." });
+  }
+
+  const consumed = await resets.updateOne(
+    { _id: reset._id, consumed: false, resetTokenHash, resetTokenExpiresAt: { $gt: new Date() } },
+    { $set: { consumed: true } },
+  );
+  if (consumed.modifiedCount !== 1) {
+    return res.status(400).json({ error: "The recovery code is expired or invalid. Request a new code." });
+  }
+
+  const updated = await req.db.collection(collectionName).updateOne(
+    { _id: account._id, passwordHash: account.passwordHash, passwordSalt: account.passwordSalt },
+    { $set: await hashPassword(newPassword) },
+  );
+  if (updated.matchedCount !== 1) {
+    return res.status(409).json({ error: "Your password changed during this request. Request a new recovery code." });
+  }
+  await resets.deleteOne({ _id: reset._id });
+  res.json({ message: "Password reset successfully. You can now sign in with your new password." });
+});
+
 app.post("/api/auth/logout", (req, res) => {
   res.clearCookie("gatherly_session", { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", path: "/api" });
   res.status(204).end();
@@ -624,12 +823,13 @@ app.patch("/api/auth/profile", requireAuth, async (req, res) => {
 });
 
 app.post("/api/auth/change-password", requireAuth, async (req, res) => {
-  const { currentPassword, newPassword } = req.body || {};
+  const { currentPassword, newPassword, confirmNewPassword } = req.body || {};
   if (typeof currentPassword !== "string" || !currentPassword
     || typeof newPassword !== "string" || newPassword.length < 8 || newPassword.length > 128
-    || !hasValidPasswordComplexity(newPassword)) {
+    || !hasValidPasswordComplexity(newPassword)
+    || typeof confirmNewPassword !== "string" || newPassword !== confirmNewPassword) {
     return res.status(400).json({
-      error: "Enter your current password. New passwords must be 8–128 characters and include uppercase, lowercase, a digit, and a supported special character.",
+      error: "Confirm the new password exactly. New passwords must be 8–128 characters and include uppercase, lowercase, a digit, and a supported special character.",
     });
   }
 
@@ -648,10 +848,13 @@ app.post("/api/auth/change-password", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Your new password must be different from your current password." });
   }
 
-  await req.db.collection(collection).updateOne(
-    { _id: objectId(req.userId) },
+  const update = await req.db.collection(collection).updateOne(
+    { _id: objectId(req.userId), passwordHash: account.passwordHash, passwordSalt: account.passwordSalt },
     { $set: await hashPassword(newPassword) },
   );
+  if (update.matchedCount !== 1) {
+    return res.status(409).json({ error: "Your password changed during this request. Please try again." });
+  }
   res.json({ message: "Password changed successfully." });
 });
 
@@ -837,7 +1040,7 @@ async function fulfillPaidOrder(database, sessionData) {
         return;
       }
       const paidAmount = paymentAttributes.amount;
-      if (paidAmount !== registration.amountCents
+      if (paidAmount !== (registration.totalChargedCents ?? registration.amountCents)
         || paymentAttributes.currency?.toUpperCase() !== "PHP") {
         throw new Error("PAYMENT_AMOUNT_MISMATCH");
       }
@@ -862,6 +1065,8 @@ async function fulfillPaidOrder(database, sessionData) {
         ticketTypeId: registration.ticketTypeId,
         amountCents: registration.amountCents,
         amount: registration.amount,
+        processingFeeCents: registration.processingFeeCents || 0,
+        totalChargedCents: registration.totalChargedCents ?? registration.amountCents,
         status: "Paid",
         transactionId,
         paymentIntentId: attributes.payment_intent?.id || "",
@@ -884,6 +1089,8 @@ async function fulfillPaidOrder(database, sessionData) {
         paymentIntentId: attributes.payment_intent?.id || "",
         amountCents: registration.amountCents,
         amount: registration.amount,
+        processingFeeCents: registration.processingFeeCents || 0,
+        totalChargedCents: registration.totalChargedCents ?? registration.amountCents,
         date: registration.date,
         endDate: registration.endDate,
         time: registration.time,
@@ -1117,6 +1324,8 @@ app.post("/api/public/events/:eventCode/register", async (req, res) => {
   }
 
   const totalCents = ticket.priceCents;
+  const processingFeeCents = totalCents > 0 ? gatherlyProcessingFeeCents : 0;
+  const totalChargedCents = totalCents + processingFeeCents;
   const orderNumber = createOrderNumber();
   const statusToken = crypto.randomBytes(24).toString("hex");
   const now = new Date();
@@ -1140,6 +1349,8 @@ app.post("/api/public/events/:eventCode/register", async (req, res) => {
     description: event.description,
     amountCents: totalCents,
     amount: new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(totalCents / 100),
+    processingFeeCents,
+    totalChargedCents,
     ownerId: event.ownerId,
     createdAt: now,
   };
@@ -1215,7 +1426,7 @@ app.post("/api/public/events/:eventCode/register", async (req, res) => {
     throw error;
   }
 
-  const publicEventUrl = `${publicAppUrl.replace(/\/+$/, "")}/events/${encodeURIComponent(event.eventCode)}`;
+  const publicEventUrl = getRegistrationUrl(event.eventCode);
   let paymentResponse;
   try {
     paymentResponse = await fetch("https://api.paymongo.com/v2/checkout_sessions", {
@@ -1227,7 +1438,10 @@ app.post("/api/public/events/:eventCode/register", async (req, res) => {
       body: JSON.stringify({
         data: {
           attributes: {
-            line_items: [{ name: `${event.name} — ${ticket.name}`, amount: ticket.priceCents, currency: "PHP", quantity: 1 }],
+            line_items: [
+              { name: `${event.name} — ${ticket.name}`, amount: ticket.priceCents, currency: "PHP", quantity: 1 },
+              { name: "Gatherly processing fee", amount: processingFeeCents, currency: "PHP", quantity: 1 },
+            ],
             payment_method_types: ["card", "gcash", "qrph", "paymaya"],
             success_url: `${publicEventUrl}?payment=success&order=${encodeURIComponent(statusToken)}`,
             cancel_url: `${publicEventUrl}?payment=cancelled&order=${encodeURIComponent(statusToken)}`,
@@ -1431,17 +1645,30 @@ app.patch("/api/events/:id/publish", async (req, res) => {
   }
 
   const events = req.db.collection("events");
-  const result = await events.findOneAndUpdate(
+  const draftEvent = await events.findOne(
     { _id: id, ownerId: req.userId, status: "Draft" },
-    { $set: { status: "On sale" } },
-    { returnDocument: "after" },
+    { projection: { eventCode: 1 } },
   );
-  if (!result) {
+  if (!draftEvent) {
     const existingEvent = await events.findOne({ _id: id, ownerId: req.userId }, { projection: { status: 1 } });
     if (!existingEvent) {
       return res.status(404).json({ error: "Event not found." });
     }
     return res.status(409).json({ error: "This event is already published." });
+  }
+
+  const result = await events.findOneAndUpdate(
+    { _id: id, ownerId: req.userId, status: "Draft", eventCode: draftEvent.eventCode },
+    {
+      $set: {
+        status: "On sale",
+        registrationUrl: getRegistrationUrl(draftEvent.eventCode),
+      },
+    },
+    { returnDocument: "after" },
+  );
+  if (!result) {
+    return res.status(409).json({ error: "The event changed while it was being published. Refresh and try again." });
   }
   return res.json(serialize(result));
 });
@@ -1614,6 +1841,10 @@ app.patch("/api/attendees/:id", async (req, res) => {
     return res.status(404).json({ error: "Attendee not found." });
   }
   res.json(serialize(result));
+});
+
+app.use("/api", (req, res) => {
+  res.status(404).json({ error: "API endpoint not found." });
 });
 
 app.use((error, req, res, next) => {

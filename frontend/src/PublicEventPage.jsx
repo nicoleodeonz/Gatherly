@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { api } from "./api.js";
 
+const gatherlyProcessingFeeCents = 2500;
+
 function formatPrice(priceCents) {
   return new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(priceCents / 100);
 }
@@ -117,6 +119,7 @@ export default function PublicEventPage({ eventCode }) {
       : [{ id: "free", name: "Free registration", priceCents: 0 }];
   const activeTicketId = ticketTypeId || tickets?.[0]?.id || "";
   const selectedTicket = tickets?.find((ticket) => ticket.id === activeTicketId);
+  const processingFeeCents = selectedTicket?.priceCents > 0 ? gatherlyProcessingFeeCents : 0;
 
   if (loading) {
     return <main className="grid min-h-screen place-items-center bg-[#FAF7F2] text-sm font-semibold text-[#2D3142]">Loading event...</main>;
@@ -154,7 +157,11 @@ export default function PublicEventPage({ eventCode }) {
               <label className="block"><span className="mb-2 block text-xs font-bold">Full name <span className="text-rose-600">*</span></span><input value={name} onChange={(input) => setName(input.target.value)} required maxLength={120} autoComplete="name" className="h-12 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
               <label className="block"><span className="mb-2 block text-xs font-bold">Email <span className="text-rose-600">*</span></span><input type="email" value={email} onChange={(input) => setEmail(input.target.value)} required maxLength={254} autoComplete="email" className="h-12 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
               <label className="block"><span className="mb-2 block text-xs font-bold">Where did you hear about this event? <span className="text-rose-600">*</span></span><input value={discoverySource} onChange={(input) => setDiscoverySource(input.target.value)} required maxLength={200} autoComplete="off" placeholder="e.g. Social media, a friend, or an ad" className="h-12 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" /></label>
-              {selectedTicket && <div className="flex justify-between border-t border-black/[.07] pt-4 text-sm"><span className="text-black/50">Total</span><strong>{formatPrice(selectedTicket.priceCents)}</strong></div>}
+              {selectedTicket && <div className="space-y-2 border-t border-black/[.07] pt-4 text-sm">
+                <div className="flex justify-between"><span className="text-black/50">Ticket price</span><span>{formatPrice(selectedTicket.priceCents)}</span></div>
+                {processingFeeCents > 0 && <div className="flex justify-between"><span className="text-black/50">Gatherly processing fee</span><span>{formatPrice(processingFeeCents)}</span></div>}
+                <div className="flex justify-between border-t border-black/[.07] pt-2"><span className="text-black/50">Total</span><strong>{formatPrice(selectedTicket.priceCents + processingFeeCents)}</strong></div>
+              </div>}
               {error && <p role="alert" className="text-xs leading-5 text-rose-600">{error}</p>}
               {message && <p role="status" className="text-xs leading-5 text-emerald-700">{message}</p>}
               <button type="submit" disabled={submitting || remainingTickets === 0} className="w-full rounded-xl bg-[#756FB8] px-5 py-3.5 text-sm font-bold text-white transition hover:bg-[#625CA4] disabled:cursor-not-allowed disabled:opacity-50">{remainingTickets === 0 ? "Sold out" : submitting ? "Processing..." : selectedTicket?.priceCents ? "Continue to secure payment" : "Complete free registration"}</button>
