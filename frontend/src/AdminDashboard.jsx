@@ -774,28 +774,18 @@ export default function AdminDashboard({ user, onSignOut, onUserUpdate }) {
 
     let activeRequest = true;
     const timeoutId = window.setTimeout(() => {
-      api("/auth/login", {
+      api("/auth/password-check", {
         method: "POST",
-        body: JSON.stringify({ email: user.email, password: profileCurrentPassword }),
-      }).then(() => {
+        body: JSON.stringify({ password: profileCurrentPassword }),
+      }).then(({ matchesCurrentPassword }) => {
         if (activeRequest) {
-          setProfileCurrentPasswordCheck({
-            state: "valid",
-            value: profileCurrentPassword,
-            message: "Current password is correct.",
-          });
+          setProfileCurrentPasswordCheck(matchesCurrentPassword
+            ? { state: "valid", value: profileCurrentPassword, message: "Current password is correct." }
+            : { state: "invalid", value: profileCurrentPassword, message: "This does not match your current password." });
         }
       }).catch((requestError) => {
         if (!activeRequest) return;
-        if (requestError.status === 401) {
-          setProfileCurrentPasswordCheck({
-            state: "invalid",
-            value: profileCurrentPassword,
-            message: "This does not match your current password.",
-          });
-        } else {
-          setProfileCurrentPasswordCheck({ state: "error", value: profileCurrentPassword, message: requestError.message });
-        }
+        setProfileCurrentPasswordCheck({ state: "error", value: profileCurrentPassword, message: requestError.message });
       });
     }, 350);
 
@@ -803,7 +793,7 @@ export default function AdminDashboard({ user, onSignOut, onUserUpdate }) {
       activeRequest = false;
       window.clearTimeout(timeoutId);
     };
-  }, [profileAction, profileCurrentPassword, user.email]);
+  }, [profileAction, profileCurrentPassword]);
 
   useEffect(() => {
     if (profileAction !== "password" || !profileNewPassword || !getPasswordRequirements(profileNewPassword).every(([, met]) => met)) {
@@ -812,28 +802,18 @@ export default function AdminDashboard({ user, onSignOut, onUserUpdate }) {
 
     let activeRequest = true;
     const timeoutId = window.setTimeout(() => {
-      api("/auth/login", {
+      api("/auth/password-check", {
         method: "POST",
-        body: JSON.stringify({ email: user.email, password: profileNewPassword }),
-      }).then(() => {
+        body: JSON.stringify({ password: profileNewPassword }),
+      }).then(({ matchesCurrentPassword }) => {
         if (activeRequest) {
-          setProfileNewPasswordCheck({
-            state: "same",
-            value: profileNewPassword,
-            message: "New password must be different from your current password.",
-          });
+          setProfileNewPasswordCheck(matchesCurrentPassword
+            ? { state: "same", value: profileNewPassword, message: "New password must be different from your current password." }
+            : { state: "different", value: profileNewPassword, message: "New password is different from your current password." });
         }
       }).catch((requestError) => {
         if (!activeRequest) return;
-        if (requestError.status === 401) {
-          setProfileNewPasswordCheck({
-            state: "different",
-            value: profileNewPassword,
-            message: "New password is different from your current password.",
-          });
-        } else {
-          setProfileNewPasswordCheck({ state: "error", value: profileNewPassword, message: requestError.message });
-        }
+        setProfileNewPasswordCheck({ state: "error", value: profileNewPassword, message: requestError.message });
       });
     }, 350);
 
@@ -841,7 +821,7 @@ export default function AdminDashboard({ user, onSignOut, onUserUpdate }) {
       activeRequest = false;
       window.clearTimeout(timeoutId);
     };
-  }, [profileAction, profileNewPassword, user.email]);
+  }, [profileAction, profileNewPassword]);
 
   async function saveProfileName(event) {
     event.preventDefault();

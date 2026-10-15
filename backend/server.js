@@ -1682,6 +1682,24 @@ app.post("/api/public/orders/:orderToken/cancel", async (req, res) => {
 
 app.use("/api", requireAuth);
 
+app.post("/api/auth/password-check", async (req, res) => {
+  const password = req.body?.password;
+  if (typeof password !== "string" || password.length === 0 || password.length > 128) {
+    return res.status(400).json({ error: "Enter a valid password to check." });
+  }
+
+  const collectionName = req.accountType === "admin" ? "admin_accounts" : "customer_accounts";
+  const account = await req.db.collection(collectionName).findOne(
+    { _id: objectId(req.userId) },
+    { projection: { passwordHash: 1, passwordSalt: 1 } },
+  );
+  if (!account) {
+    return res.status(404).json({ error: "Your account could not be found." });
+  }
+
+  return res.json({ matchesCurrentPassword: await verifyPassword(password, account) });
+});
+
 app.post("/api/organizer/analytics-report", async (req, res) => {
   if (req.accountType !== "customer") {
     return res.status(403).json({ error: "Organizer access is required." });

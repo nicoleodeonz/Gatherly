@@ -848,29 +848,17 @@ function Dashboard({ user, onSignOut, onUserUpdate }) {
 
     let activeRequest = true;
     const timeoutId = window.setTimeout(() => {
-      api("/auth/login", {
+      api("/auth/password-check", {
         method: "POST",
-        body: JSON.stringify({ email: user.email, password: currentPassword }),
-      }).then(() => {
+        body: JSON.stringify({ password: currentPassword }),
+      }).then(({ matchesCurrentPassword }) => {
         if (activeRequest) {
-          setCurrentPasswordCheck({
-            state: "valid",
-            value: currentPassword,
-            message: "Current password is correct.",
-          });
+          setCurrentPasswordCheck(matchesCurrentPassword
+            ? { state: "valid", value: currentPassword, message: "Current password is correct." }
+            : { state: "invalid", value: currentPassword, message: "This does not match your current password." });
         }
       }).catch((error) => {
-        if (activeRequest) {
-          if (error.status === 401) {
-            setCurrentPasswordCheck({
-              state: "invalid",
-              value: currentPassword,
-              message: "This does not match your current password.",
-            });
-          } else {
-            setCurrentPasswordCheck({ state: "error", value: currentPassword, message: error.message });
-          }
-        }
+        if (activeRequest) setCurrentPasswordCheck({ state: "error", value: currentPassword, message: error.message });
       });
     }, 350);
 
@@ -878,7 +866,7 @@ function Dashboard({ user, onSignOut, onUserUpdate }) {
       activeRequest = false;
       window.clearTimeout(timeoutId);
     };
-  }, [currentPassword, profileAction, user.email]);
+  }, [currentPassword, profileAction]);
 
   useEffect(() => {
     if (profileAction !== "password" || !newPassword || !getPasswordRequirements(newPassword).every(([, met]) => met)) {
@@ -887,28 +875,17 @@ function Dashboard({ user, onSignOut, onUserUpdate }) {
 
     let activeRequest = true;
     const timeoutId = window.setTimeout(() => {
-      api("/auth/login", {
+      api("/auth/password-check", {
         method: "POST",
-        body: JSON.stringify({ email: user.email, password: newPassword }),
-      }).then(() => {
+        body: JSON.stringify({ password: newPassword }),
+      }).then(({ matchesCurrentPassword }) => {
         if (activeRequest) {
-          setNewPasswordCheck({
-            state: "same",
-            value: newPassword,
-            message: "New password must be different from your current password.",
-          });
+          setNewPasswordCheck(matchesCurrentPassword
+            ? { state: "same", value: newPassword, message: "New password must be different from your current password." }
+            : { state: "different", value: newPassword, message: "New password is different from your current password." });
         }
       }).catch((error) => {
-        if (!activeRequest) return;
-        if (error.status === 401) {
-          setNewPasswordCheck({
-            state: "different",
-            value: newPassword,
-            message: "New password is different from your current password.",
-          });
-        } else {
-          setNewPasswordCheck({ state: "error", value: newPassword, message: error.message });
-        }
+        if (activeRequest) setNewPasswordCheck({ state: "error", value: newPassword, message: error.message });
       });
     }, 350);
 
@@ -916,7 +893,7 @@ function Dashboard({ user, onSignOut, onUserUpdate }) {
       activeRequest = false;
       window.clearTimeout(timeoutId);
     };
-  }, [newPassword, profileAction, user.email]);
+  }, [newPassword, profileAction]);
 
   useEffect(() => {
     let activeRequest = true;

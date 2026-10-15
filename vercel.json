@@ -24,6 +24,12 @@
       }
     },
     {
+      "source": "/workspace/(.*)",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
       "source": "/api/(.*)",
       "destination": {
         "service": "backend"
