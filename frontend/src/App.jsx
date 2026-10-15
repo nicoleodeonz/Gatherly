@@ -30,6 +30,22 @@ function Icon({ name, className = "size-5" }) {
   return <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
 
+function OrganizerPagination({ itemCount, page, onPageChange, pageSize = 5, label }) {
+  const pageCount = Math.max(1, Math.ceil(itemCount / pageSize));
+  const firstItem = itemCount ? (page - 1) * pageSize + 1 : 0;
+  const lastItem = Math.min(page * pageSize, itemCount);
+  return (
+    <div className="flex flex-col gap-3 border-t border-black/[.05] px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+      <p className="text-[11px] text-black/40">Showing {firstItem}–{lastItem} of {itemCount} {label}</p>
+      {pageCount > 1 && <nav aria-label={`${label} pagination`} className="flex items-center justify-end gap-1">
+        <button type="button" disabled={page === 1} onClick={() => onPageChange(page - 1)} className="rounded-lg border border-black/[.07] px-3 py-2 text-[11px] font-bold text-black/55 transition hover:bg-[#F8F6F3] disabled:cursor-not-allowed disabled:opacity-30">Previous</button>
+        <span className="px-3 text-[11px] font-semibold text-black/45">Page {page} of {pageCount}</span>
+        <button type="button" disabled={page === pageCount} onClick={() => onPageChange(page + 1)} className="rounded-lg border border-black/[.07] px-3 py-2 text-[11px] font-bold text-black/55 transition hover:bg-[#F8F6F3] disabled:cursor-not-allowed disabled:opacity-30">Next</button>
+      </nav>}
+    </div>
+  );
+}
+
 const eventImage = "https://images.unsplash.com/photo-1567779013473-6cbdff716235?crop=entropy&cs=tinysrgb&fit=crop&fm=jpg&q=85&w=1200";
 
 const nav = [
@@ -822,6 +838,8 @@ function Dashboard({ user, onSignOut, onUserUpdate }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [page, setPage] = useState(1);
+  const [orderPage, setOrderPage] = useState(1);
+  const [attendeePage, setAttendeePage] = useState(1);
   const [analyticsPeriod, setAnalyticsPeriod] = useState("day");
   const [revenueAnalyticsPeriod, setRevenueAnalyticsPeriod] = useState("day");
   const [organizerAnalyticsExportOpen, setOrganizerAnalyticsExportOpen] = useState(false);
@@ -948,8 +966,9 @@ function Dashboard({ user, onSignOut, onUserUpdate }) {
     const matchesFilter = active === "Overview" || filter === (archiveView ? "All archived" : "All events") || event.status === filter;
     return matchesSearch && matchesFilter;
   }), [events, search, filter, archiveView, active]);
-  const totalPages = Math.max(1, Math.ceil(filtered.length / 3));
-  const pagedEvents = filtered.slice((page - 1) * 3, page * 3);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / 5));
+  const currentEventPage = Math.min(page, totalPages);
+  const pagedEvents = filtered.slice((currentEventPage - 1) * 5, currentEventPage * 5);
   const selectedEvent = events.find((event) => event.id === editingEvent);
 
   async function saveEvent(event) {
@@ -1185,6 +1204,12 @@ function Dashboard({ user, onSignOut, onUserUpdate }) {
   const visibleAttendees = activeAttendeeEventTab !== "overview"
     ? attendees.filter((person) => person.eventCode === activeAttendeeEventTab)
     : attendees;
+  const orderPageCount = Math.max(1, Math.ceil(visibleOrders.length / 5));
+  const currentOrderPage = Math.min(orderPage, orderPageCount);
+  const pagedOrders = visibleOrders.slice((currentOrderPage - 1) * 5, currentOrderPage * 5);
+  const attendeePageCount = Math.max(1, Math.ceil(visibleAttendees.length / 5));
+  const currentAttendeePage = Math.min(attendeePage, attendeePageCount);
+  const pagedAttendees = visibleAttendees.slice((currentAttendeePage - 1) * 5, currentAttendeePage * 5);
   const analyticsTabEvents = eventTabEvents.filter((event) => !hiddenAnalyticsEventCodes.includes(event.eventCode));
   const selectedAnalyticsEvent = analyticsTabEvents.find((event) => event.eventCode === analyticsEventTab);
   const analyticsEvents = selectedAnalyticsEvent
@@ -1467,15 +1492,15 @@ function Dashboard({ user, onSignOut, onUserUpdate }) {
             <div className="border-b border-black/[.06] p-6">
               <div className="flex items-center gap-2 border-b border-black/[.08]">
                 <div role="tablist" aria-label="Filter orders by event" className="flex min-w-0 flex-1 gap-2 overflow-x-auto">
-                  <button type="button" role="tab" aria-selected={activeOrderEventTab === "overview"} onClick={() => setOrderEventTab("overview")} className={`shrink-0 border-b-2 px-4 py-3 text-xs font-bold transition ${activeOrderEventTab === "overview" ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>Overview</button>
-                  {visibleOrderTabs.map((event) => <button key={event.eventCode} type="button" role="tab" aria-selected={activeOrderEventTab === event.eventCode} onClick={() => setOrderEventTab(event.eventCode)} className={`max-w-56 shrink-0 truncate border-b-2 px-4 py-3 text-xs font-bold transition ${activeOrderEventTab === event.eventCode ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>{event.name}</button>)}
+                  <button type="button" role="tab" aria-selected={activeOrderEventTab === "overview"} onClick={() => { setOrderEventTab("overview"); setOrderPage(1); }} className={`shrink-0 border-b-2 px-4 py-3 text-xs font-bold transition ${activeOrderEventTab === "overview" ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>Overview</button>
+                  {visibleOrderTabs.map((event) => <button key={event.eventCode} type="button" role="tab" aria-selected={activeOrderEventTab === event.eventCode} onClick={() => { setOrderEventTab(event.eventCode); setOrderPage(1); }} className={`max-w-56 shrink-0 truncate border-b-2 px-4 py-3 text-xs font-bold transition ${activeOrderEventTab === event.eventCode ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>{event.name}</button>)}
                 </div>
                 <button type="button" aria-label="Choose events shown in order tabs" title="Configure event tabs" onClick={() => setEventTabSettingsSection("orders")} className="grid size-9 shrink-0 place-items-center rounded-xl text-black/45 transition hover:bg-[#F8F6F3] hover:text-[#756FB8]"><Icon name="settings" className="size-5" /></button>
               </div>
               <div className="mt-4"><h2 className="text-lg font-extrabold">Recent orders</h2><p className="mt-1 text-xs text-black/40">Review payments{activeOrderEventTab !== "overview" ? ` · ${visibleOrderTabs.find((event) => event.eventCode === activeOrderEventTab)?.name || ""}` : ""}.</p></div>
             </div>
             <div className="divide-y divide-black/[.05]">
-              {visibleOrders.map((order) => <div key={order.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:px-6">
+              {pagedOrders.map((order) => <div key={order.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:px-6">
                 <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-[#E7E6F2] text-[#756FB8]"><Icon name="ticket" className="size-5" /></div>
                 <div className="min-w-0 flex-1"><p className="text-sm font-bold">{order.buyer}</p><p className="mt-1 truncate text-[11px] text-black/40">{order.number} · {order.event}</p></div>
                 <p className="text-sm font-extrabold">{order.amount}</p>
@@ -1483,21 +1508,22 @@ function Dashboard({ user, onSignOut, onUserUpdate }) {
               </div>)}
               {visibleOrders.length === 0 && <p className="p-6 text-sm text-black/45">{activeOrderEventTab !== "overview" ? "No orders for this event yet." : "No orders yet."}</p>}
             </div>
+            <OrganizerPagination itemCount={visibleOrders.length} page={currentOrderPage} onPageChange={setOrderPage} label="orders" />
           </section>}
 
           {active === "Attendees" && <section className="overflow-hidden rounded-2xl border border-black/[.055] bg-white">
             <div className="border-b border-black/[.06] p-6">
               <div className="flex items-center gap-2 border-b border-black/[.08]">
                 <div role="tablist" aria-label="Filter attendees by event" className="flex min-w-0 flex-1 gap-2 overflow-x-auto">
-                  <button type="button" role="tab" aria-selected={activeAttendeeEventTab === "overview"} onClick={() => setAttendeeEventTab("overview")} className={`shrink-0 border-b-2 px-4 py-3 text-xs font-bold transition ${activeAttendeeEventTab === "overview" ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>Overview</button>
-                  {visibleAttendeeTabs.map((event) => <button key={event.eventCode} type="button" role="tab" aria-selected={activeAttendeeEventTab === event.eventCode} onClick={() => setAttendeeEventTab(event.eventCode)} className={`max-w-56 shrink-0 truncate border-b-2 px-4 py-3 text-xs font-bold transition ${activeAttendeeEventTab === event.eventCode ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>{event.name}</button>)}
+                  <button type="button" role="tab" aria-selected={activeAttendeeEventTab === "overview"} onClick={() => { setAttendeeEventTab("overview"); setAttendeePage(1); }} className={`shrink-0 border-b-2 px-4 py-3 text-xs font-bold transition ${activeAttendeeEventTab === "overview" ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>Overview</button>
+                  {visibleAttendeeTabs.map((event) => <button key={event.eventCode} type="button" role="tab" aria-selected={activeAttendeeEventTab === event.eventCode} onClick={() => { setAttendeeEventTab(event.eventCode); setAttendeePage(1); }} className={`max-w-56 shrink-0 truncate border-b-2 px-4 py-3 text-xs font-bold transition ${activeAttendeeEventTab === event.eventCode ? "border-[#756FB8] text-[#756FB8]" : "border-transparent text-black/45 hover:text-black/70"}`}>{event.name}</button>)}
                 </div>
                 <button type="button" aria-label="Choose events shown in attendee tabs" title="Configure event tabs" onClick={() => setEventTabSettingsSection("attendees")} className="grid size-9 shrink-0 place-items-center rounded-xl text-black/45 transition hover:bg-[#F8F6F3] hover:text-[#756FB8]"><Icon name="settings" className="size-5" /></button>
               </div>
               <div className="mt-4"><h2 className="text-lg font-extrabold">Attendee check-in</h2><p className="mt-1 text-xs text-black/40">{visibleAttendees.filter((person) => person.checkedIn).length} of {visibleAttendees.length} guests checked in{activeAttendeeEventTab !== "overview" ? ` · ${visibleAttendeeTabs.find((event) => event.eventCode === activeAttendeeEventTab)?.name || ""}` : ""}.</p></div>
             </div>
             <div className="divide-y divide-black/[.05]">
-              {visibleAttendees.map((person) => {
+              {pagedAttendees.map((person) => {
                 const attendeeEvent = events.find((event) => event.eventCode === person.eventCode || event.id === person.eventId);
                 const canCheckInToday = attendeeEvent
                   ? isEventDateToday(attendeeEvent)
@@ -1520,6 +1546,7 @@ function Dashboard({ user, onSignOut, onUserUpdate }) {
               })}
               {visibleAttendees.length === 0 && <p className="p-6 text-sm text-black/45">{activeAttendeeEventTab !== "overview" ? "No attendees for this event yet." : "No attendees yet."}</p>}
             </div>
+            <OrganizerPagination itemCount={visibleAttendees.length} page={currentAttendeePage} onPageChange={setAttendeePage} label="attendees" />
           </section>}
 
           {active === "Analytics" && <section className="rounded-2xl border border-black/[.055] bg-white p-6 sm:p-8">
@@ -1825,7 +1852,7 @@ function Dashboard({ user, onSignOut, onUserUpdate }) {
               </table>
               {filtered.length === 0 && <div className="py-14 text-center"><p className="font-bold">{archiveView ? "No archived events yet" : "No events found"}</p><p className="mt-1 text-xs text-black/40">{archiveView ? "Finished and cancelled events will appear here." : "Try another search or filter."}</p></div>}
             </div>
-            <div className="flex items-center justify-between border-t border-black/[.05] px-6 py-4"><p className="text-[11px] text-black/40">Showing {filtered.length ? (page - 1) * 3 + 1 : 0}–{Math.min(page * 3, filtered.length)} of {filtered.length} events</p><div className="flex gap-1"><button disabled={page === 1} onClick={() => setPage((current) => Math.max(1, current - 1))} className="grid size-8 place-items-center rounded-lg border border-black/[.07] text-black/50 disabled:opacity-25"><Icon name="arrow" className="size-3 rotate-180" /></button><button className="grid size-8 place-items-center rounded-lg bg-[#756FB8] text-[11px] font-bold text-white">{page}</button><button disabled={page === totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))} className="grid size-8 place-items-center rounded-lg border border-black/[.07] text-black/50 disabled:opacity-25"><Icon name="arrow" className="size-3" /></button></div></div>
+            <OrganizerPagination itemCount={filtered.length} page={currentEventPage} onPageChange={setPage} label="events" />
           </section>}
         </div>
       </main>
