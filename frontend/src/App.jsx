@@ -2992,6 +2992,6 @@ export default function App() {
   return screen === "landing"
     ? <Landing onEnter={enterDashboard} initialError={sessionError} />
     : user.accountType === "admin"
-      ? <AdminDashboard user={user} onSignOut={signOut} />
+      ? <AdminDashboard user={user} onSignOut={signOut} onUserUpdate={setUser} />
       : <Dashboard user={user} onSignOut={signOut} onUserUpdate={setUser} />;
 }

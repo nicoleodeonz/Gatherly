@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { workspaceApi } from "./api.js";
+import { api, workspaceApi } from "./api.js";
 
 const sections = [
   { name: "Overview", icon: "overview" },
@@ -17,6 +17,8 @@ function AdminIcon({ name, className = "size-5" }) {
     settings: <><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.1h-4v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1-2.8-2.8.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H3v-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1 2.8-2.8.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6V3h4v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1 2.8 2.8-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.1v4H21a1.7 1.7 0 0 0-1.6 1Z" /></>,
     menu: <path d="M4 7h16M4 12h16M4 17h16" />,
     close: <path d="m6 6 12 12M18 6 6 18" />,
+    eye: <><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></>,
+    eyeOff: <><path d="m3 3 18 18M10.6 10.6a2 2 0 0 0 2.8 2.8" /><path d="M9.9 5.2A10.8 10.8 0 0 1 12 5c6.4 0 10 7 10 7a15.5 15.5 0 0 1-4 4.7M6.2 6.2C3.5 8 2 12 2 12s3.6 7 10 7c1 0 2-.2 2.9-.5" /></>,
   };
 
   return <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
@@ -28,6 +30,18 @@ function formatDate(value) {
   return Number.isNaN(date.getTime())
     ? "—"
     : new Intl.DateTimeFormat("en-PH", { dateStyle: "medium" }).format(date);
+}
+
+const passwordSpecialCharacters = "!@#$%^&*()_+-=[]{}|;:'\",.<>/?~`";
+
+function getPasswordRequirements(password) {
+  return [
+    ["At least 8 characters", password.length >= 8],
+    ["At least one uppercase letter", /[A-Z]/.test(password)],
+    ["At least one lowercase letter", /[a-z]/.test(password)],
+    ["At least one digit", /\d/.test(password)],
+    ["At least one special character", [...password].some((character) => passwordSpecialCharacters.includes(character))],
+  ];
 }
 
 function getManilaParts(date) {
@@ -691,7 +705,7 @@ function AdminPagination({ itemCount, page, onPageChange, pageSize }) {
   );
 }
 
-export default function AdminDashboard({ user, onSignOut }) {
+export default function AdminDashboard({ user, onSignOut, onUserUpdate }) {
   const pageSize = 5;
   const [active, setActive] = useState("Overview");
   const [users, setUsers] = useState([]);
@@ -701,6 +715,7 @@ export default function AdminDashboard({ user, onSignOut }) {
   const [analyticsExporting, setAnalyticsExporting] = useState(false);
   const [analyticsExportMenuOpen, setAnalyticsExportMenuOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [userRoleFilter, setUserRoleFilter] = useState("all");
   const [page, setPage] = useState(1);
   const [accountCreationPeriod, setAccountCreationPeriod] = useState("day");
   const [accountCreationDate, setAccountCreationDate] = useState(() => {
@@ -722,6 +737,18 @@ export default function AdminDashboard({ user, onSignOut }) {
   const [signOutError, setSignOutError] = useState("");
   const [signingOut, setSigningOut] = useState(false);
   const [signOutConfirmOpen, setSignOutConfirmOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileAction, setProfileAction] = useState("");
+  const [profileName, setProfileName] = useState(user.name);
+  const [profileCurrentPassword, setProfileCurrentPassword] = useState("");
+  const [profileCurrentPasswordCheck, setProfileCurrentPasswordCheck] = useState({ state: "empty", value: "", message: "" });
+  const [profileNewPassword, setProfileNewPassword] = useState("");
+  const [profileNewPasswordCheck, setProfileNewPasswordCheck] = useState({ state: "empty", value: "", message: "" });
+  const [profileConfirmPassword, setProfileConfirmPassword] = useState("");
+  const [profilePasswordVisibility, setProfilePasswordVisibility] = useState({ current: false, new: false, confirm: false });
+  const [profileError, setProfileError] = useState("");
+  const [profileMessage, setProfileMessage] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
   const [viewingAccount, setViewingAccount] = useState(null);
   const [pendingAccountAction, setPendingAccountAction] = useState(null);
   const [accountActionError, setAccountActionError] = useState("");
@@ -739,6 +766,138 @@ export default function AdminDashboard({ user, onSignOut }) {
   const [processingFeeInput, setProcessingFeeInput] = useState("");
   const [processingFeeError, setProcessingFeeError] = useState("");
   const [processingFeeSaving, setProcessingFeeSaving] = useState(false);
+
+  useEffect(() => {
+    if (profileAction !== "password" || !profileCurrentPassword) {
+      return undefined;
+    }
+
+    let activeRequest = true;
+    const timeoutId = window.setTimeout(() => {
+      api("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email: user.email, password: profileCurrentPassword }),
+      }).then(() => {
+        if (activeRequest) {
+          setProfileCurrentPasswordCheck({
+            state: "valid",
+            value: profileCurrentPassword,
+            message: "Current password is correct.",
+          });
+        }
+      }).catch((requestError) => {
+        if (!activeRequest) return;
+        if (requestError.status === 401) {
+          setProfileCurrentPasswordCheck({
+            state: "invalid",
+            value: profileCurrentPassword,
+            message: "This does not match your current password.",
+          });
+        } else {
+          setProfileCurrentPasswordCheck({ state: "error", value: profileCurrentPassword, message: requestError.message });
+        }
+      });
+    }, 350);
+
+    return () => {
+      activeRequest = false;
+      window.clearTimeout(timeoutId);
+    };
+  }, [profileAction, profileCurrentPassword, user.email]);
+
+  useEffect(() => {
+    if (profileAction !== "password" || !profileNewPassword || !getPasswordRequirements(profileNewPassword).every(([, met]) => met)) {
+      return undefined;
+    }
+
+    let activeRequest = true;
+    const timeoutId = window.setTimeout(() => {
+      api("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email: user.email, password: profileNewPassword }),
+      }).then(() => {
+        if (activeRequest) {
+          setProfileNewPasswordCheck({
+            state: "same",
+            value: profileNewPassword,
+            message: "New password must be different from your current password.",
+          });
+        }
+      }).catch((requestError) => {
+        if (!activeRequest) return;
+        if (requestError.status === 401) {
+          setProfileNewPasswordCheck({
+            state: "different",
+            value: profileNewPassword,
+            message: "New password is different from your current password.",
+          });
+        } else {
+          setProfileNewPasswordCheck({ state: "error", value: profileNewPassword, message: requestError.message });
+        }
+      });
+    }, 350);
+
+    return () => {
+      activeRequest = false;
+      window.clearTimeout(timeoutId);
+    };
+  }, [profileAction, profileNewPassword, user.email]);
+
+  async function saveProfileName(event) {
+    event.preventDefault();
+    if (profileSaving) return;
+    setProfileSaving(true);
+    setProfileError("");
+    setProfileMessage("");
+    try {
+      const { user: updatedUser } = await api("/auth/profile", {
+        method: "PATCH",
+        body: JSON.stringify({ name: profileName }),
+      });
+      onUserUpdate(updatedUser);
+      setProfileName(updatedUser.name);
+      setProfileAction("");
+      setProfileMessage("Your name has been updated.");
+    } catch (requestError) {
+      setProfileError(requestError.message);
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
+  async function changeProfilePassword(event) {
+    event.preventDefault();
+    if (profileSaving) return;
+    if (profileNewPassword !== profileConfirmPassword) {
+      setProfileError("The new passwords do not match.");
+      return;
+    }
+    setProfileSaving(true);
+    setProfileError("");
+    setProfileMessage("");
+    try {
+      const result = await api("/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({
+          currentPassword: profileCurrentPassword,
+          newPassword: profileNewPassword,
+          confirmNewPassword: profileConfirmPassword,
+        }),
+      });
+      setProfileCurrentPassword("");
+      setProfileCurrentPasswordCheck({ state: "empty", value: "", message: "" });
+      setProfileNewPassword("");
+      setProfileNewPasswordCheck({ state: "empty", value: "", message: "" });
+      setProfileConfirmPassword("");
+      setProfilePasswordVisibility({ current: false, new: false, confirm: false });
+      setProfileAction("");
+      setProfileMessage(result.message);
+    } catch (requestError) {
+      setProfileError(requestError.message);
+    } finally {
+      setProfileSaving(false);
+    }
+  }
 
   useEffect(() => {
     let activeRequest = true;
@@ -793,8 +952,10 @@ export default function AdminDashboard({ user, onSignOut }) {
   const filteredUsers = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     return users.filter((account) => Boolean(account.disabledAt || account.archivedAt) === showArchives).filter((account) => !query
-      || [account.name, account.email].some((value) => value?.toLocaleLowerCase().includes(query)));
-  }, [search, showArchives, users]);
+      || [account.name, account.email].some((value) => value?.toLocaleLowerCase().includes(query)))
+      .filter((account) => userRoleFilter === "all"
+        || (userRoleFilter === "admins" ? account.accountType === "admin" : account.accountType !== "admin"));
+  }, [search, showArchives, userRoleFilter, users]);
 
   const filteredEvents = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -1014,7 +1175,28 @@ export default function AdminDashboard({ user, onSignOut }) {
             <p className="mt-1 text-sm font-bold">{active}</p>
           </div>
           <div className="ml-auto flex items-center gap-3">
-            <div className="hidden size-9 place-items-center rounded-xl bg-[#E6E2F2] text-xs font-extrabold text-[#7067AD] sm:grid">{initials}</div>
+            <button
+              type="button"
+              onClick={() => {
+                setProfileName(user.name);
+                setProfileAction("");
+                setProfileCurrentPassword("");
+                setProfileCurrentPasswordCheck({ state: "empty", value: "", message: "" });
+                setProfileNewPassword("");
+                setProfileNewPasswordCheck({ state: "empty", value: "", message: "" });
+                setProfileConfirmPassword("");
+                setProfilePasswordVisibility({ current: false, new: false, confirm: false });
+                setProfileError("");
+                setProfileMessage("");
+                setProfileOpen(true);
+              }}
+              aria-label="Open admin profile"
+              title="Open admin profile"
+              className="flex items-center gap-2 rounded-xl p-1.5 transition hover:bg-white"
+            >
+              <span className="grid size-9 place-items-center rounded-xl bg-[#E6E2F2] text-xs font-extrabold text-[#7067AD]">{initials}</span>
+              <span className="hidden text-left sm:block"><span className="block max-w-36 truncate text-xs font-bold">{user.name}</span><span className="text-[10px] text-black/40">Profile</span></span>
+            </button>
             <button onClick={() => setSignOutConfirmOpen(true)} disabled={signingOut} className="rounded-xl border border-black/[.07] bg-white px-3 py-2 text-xs font-bold text-black/55 transition hover:text-black disabled:opacity-50">Sign out</button>
           </div>
         </header>
@@ -1354,7 +1536,7 @@ export default function AdminDashboard({ user, onSignOut }) {
               <div className="border-b border-black/[.06] p-5 sm:px-6"><h2 className="text-lg font-extrabold">{showArchives ? "Archived accounts" : "Accounts"}</h2><p className="mt-1 text-xs text-black/40">Showing {filteredUsers.length.toLocaleString("en-PH")} {showArchives ? "archived " : ""}account{filteredUsers.length === 1 ? "" : "s"}</p></div>
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[950px] text-left">
-                  <thead><tr className="border-b border-black/[.05] text-[10px] font-bold uppercase tracking-[.12em] text-black/35"><th className="px-6 py-4">Name</th><th className="px-4 py-4">Email</th><th className="px-4 py-4">Role</th><th className="px-4 py-4">Joined</th><th className="px-4 py-4">Status</th><th className="px-6 py-4 text-right">Actions</th></tr></thead>
+                  <thead><tr className="border-b border-black/[.05] text-[10px] font-bold uppercase tracking-[.12em] text-black/35"><th className="px-6 py-4">Name</th><th className="px-4 py-4">Email</th><th className="px-4 py-3"><label className="sr-only" htmlFor="user-role-filter">Filter accounts by role</label><select id="user-role-filter" aria-label="Filter accounts by role" value={userRoleFilter} onChange={(event) => { setUserRoleFilter(event.target.value); setPage(1); }} className="max-w-full rounded-lg border border-black/[.08] bg-white px-2 py-2 text-[10px] font-bold uppercase tracking-[.08em] text-black/45 outline-none focus:border-[#756FB8]/50 focus:ring-2 focus:ring-[#756FB8]/10"><option value="all">All Roles</option><option value="organizers">Organizers</option><option value="admins">Admins</option></select></th><th className="px-4 py-4">Joined</th><th className="px-4 py-4">Status</th><th className="px-6 py-4 text-right">Actions</th></tr></thead>
                   <tbody>{paginatedUsers.map((account) => (
                     <tr key={account.id} className="border-b border-black/[.045] last:border-0 hover:bg-[#F9F7F5]">
                       <td className="px-6 py-4 text-sm font-bold">{account.name}</td>
@@ -1457,6 +1639,125 @@ export default function AdminDashboard({ user, onSignOut }) {
                     {accountActionLoading ? "Saving…" : pendingAccountAction.value ? "Disable account" : "Enable account"}
                   </button>
                 </div>
+              </section>
+            </div>
+          )}
+          {profileOpen && (
+            <div className="fixed inset-0 z-[60] grid place-items-center bg-[#2D3142]/65 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !profileSaving) setProfileOpen(false); }}>
+              <section role="dialog" aria-modal="true" aria-labelledby="admin-profile-title" className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl sm:p-8">
+                <div className="mb-7 flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-[.15em] text-[#756FB8]">Admin workspace</p>
+                    <h2 id="admin-profile-title" className="mt-2 text-2xl font-extrabold tracking-tight">Your profile</h2>
+                    <p className="mt-2 text-xs leading-5 text-black/45">Your Gatherly account details.</p>
+                  </div>
+                  <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                    <button type="button" disabled={profileSaving} onClick={() => { setProfileAction("edit"); setProfileName(user.name); setProfileError(""); setProfileMessage(""); }} className="rounded-xl border border-[#756FB8]/25 px-3 py-2 text-xs font-bold text-[#625CA4] transition hover:bg-[#E7E6F2] disabled:opacity-50">Edit profile</button>
+                    <button type="button" disabled={profileSaving} onClick={() => { setProfileAction("password"); setProfileCurrentPassword(""); setProfileCurrentPasswordCheck({ state: "empty", value: "", message: "" }); setProfileNewPassword(""); setProfileNewPasswordCheck({ state: "empty", value: "", message: "" }); setProfileConfirmPassword(""); setProfilePasswordVisibility({ current: false, new: false, confirm: false }); setProfileError(""); setProfileMessage(""); }} className="rounded-xl bg-[#756FB8] px-3 py-2 text-xs font-bold text-white transition hover:bg-[#625CA4] disabled:opacity-50">Change password</button>
+                    <button type="button" disabled={profileSaving} onClick={() => setProfileOpen(false)} className="rounded-xl bg-black/[.04] p-2 text-black/50 transition hover:bg-black/[.08] disabled:opacity-50" aria-label="Close profile"><AdminIcon name="close" /></button>
+                  </div>
+                </div>
+                <div className="grid gap-5 sm:grid-cols-[.8fr_1.2fr]">
+                  <article className="rounded-2xl bg-[#333746] p-6 text-white">
+                    <div className="grid size-16 place-items-center rounded-2xl bg-[#F4DFA6] text-xl font-extrabold text-[#2D3142]">{initials}</div>
+                    <h3 className="mt-5 text-lg font-extrabold">{user.name}</h3>
+                    <p className="mt-1 break-all text-xs text-white/55">{user.email}</p>
+                    <div className="mt-5 rounded-xl bg-white/[.07] p-4">
+                      <p className="text-[10px] font-bold uppercase tracking-[.15em] text-white/40">Account type</p>
+                      <p className="mt-2 text-sm font-bold">Administrator</p>
+                    </div>
+                  </article>
+                  <div className="rounded-2xl border border-black/[.06] p-6">
+                    {profileAction === "edit" ? <form onSubmit={saveProfileName}>
+                      <h3 className="text-sm font-extrabold">Edit profile</h3>
+                      <label className="mt-5 block">
+                        <span className="mb-2 block text-[11px] font-semibold text-black/45">Full name</span>
+                        <input value={profileName} onChange={(event) => setProfileName(event.target.value)} required maxLength={100} autoComplete="name" className="h-11 w-full rounded-xl border border-black/10 px-3 text-sm outline-none focus:border-[#756FB8]" />
+                      </label>
+                      <div className="mt-4"><p className="text-[11px] font-semibold text-black/40">Email address</p><p className="mt-1 break-all text-sm font-bold">{user.email}</p></div>
+                      <p className="mt-5 rounded-xl bg-[#F8F6F3] p-4 text-xs leading-5 text-black/50">Your email is used to sign in and cannot be changed here.</p>
+                      {profileError && <p role="alert" className="mt-4 text-xs font-semibold text-rose-600">{profileError}</p>}
+                      <div className="mt-5 flex justify-end gap-2">
+                        <button type="button" disabled={profileSaving} onClick={() => { setProfileAction(""); setProfileError(""); }} className="rounded-xl border border-black/10 px-4 py-2.5 text-xs font-bold text-black/60 transition hover:bg-black/[.03] disabled:opacity-50">Cancel</button>
+                        <button type="submit" disabled={profileSaving || profileName.trim() === user.name} className="rounded-xl bg-[#756FB8] px-4 py-2.5 text-xs font-bold text-white transition hover:bg-[#625CA4] disabled:cursor-not-allowed disabled:opacity-50">{profileSaving ? "Saving..." : "Save changes"}</button>
+                      </div>
+                    </form> : profileAction === "password" ? <form onSubmit={changeProfilePassword}>
+                      <h3 className="text-sm font-extrabold">Change password</h3>
+                      <div className="mt-5 space-y-4">
+                        {[
+                          ["current", "Current password", profileCurrentPassword, setProfileCurrentPassword, "current-password"],
+                          ["new", "New password", profileNewPassword, setProfileNewPassword, "new-password"],
+                          ["confirm", "Confirm new password", profileConfirmPassword, setProfileConfirmPassword, "new-password"],
+                        ].map(([key, label, value, setValue, autoComplete]) => <label key={key} className="block">
+                          <span className="mb-2 block text-[11px] font-semibold text-black/45">{label}</span>
+                          <span className="relative block">
+                            <input
+                              type={profilePasswordVisibility[key] ? "text" : "password"}
+                              value={value}
+                              onChange={(event) => {
+                                const nextValue = event.target.value;
+                                setValue(nextValue);
+                                if (key === "current") {
+                                  setProfileCurrentPasswordCheck({
+                                    state: nextValue ? "checking" : "empty",
+                                    value: nextValue,
+                                    message: nextValue ? "Checking current password..." : "",
+                                  });
+                                } else if (key === "new") {
+                                  const meetsRequirements = getPasswordRequirements(nextValue).every(([, met]) => met);
+                                  setProfileNewPasswordCheck({
+                                    state: !nextValue ? "empty" : meetsRequirements ? "checking" : "incomplete",
+                                    value: nextValue,
+                                    message: !nextValue
+                                      ? ""
+                                      : meetsRequirements
+                                        ? "Checking against your current password..."
+                                        : "Complete the password requirements to check it.",
+                                  });
+                                }
+                              }}
+                              required
+                              {...(key === "new" ? { minLength: 8, maxLength: 128 } : {})}
+                              autoComplete={autoComplete}
+                              className="h-11 w-full rounded-xl border border-black/10 px-3 pr-11 text-sm outline-none focus:border-[#756FB8]"
+                            />
+                            <button type="button" onClick={() => setProfilePasswordVisibility((current) => ({ ...current, [key]: !current[key] }))} aria-label={`${profilePasswordVisibility[key] ? "Hide" : "Show"} ${label.toLowerCase()}`} aria-pressed={profilePasswordVisibility[key]} className="absolute inset-y-0 right-0 grid w-11 place-items-center text-black/40 transition hover:text-[#625CA4]"><AdminIcon name={profilePasswordVisibility[key] ? "eyeOff" : "eye"} className="size-[18px]" /></button>
+                          </span>
+                          {key === "current" && profileCurrentPasswordCheck.value === profileCurrentPassword && profileCurrentPasswordCheck.message && <span
+                            role={profileCurrentPasswordCheck.state === "invalid" || profileCurrentPasswordCheck.state === "error" ? "alert" : "status"}
+                            className={`mt-1.5 block text-[11px] font-semibold ${profileCurrentPasswordCheck.state === "valid" ? "text-emerald-700" : profileCurrentPasswordCheck.state === "checking" ? "text-black/40" : "text-rose-600"}`}
+                          >
+                            {profileCurrentPasswordCheck.message}
+                          </span>}
+                          {key === "confirm" && profileConfirmPassword && <span role={profileNewPassword === profileConfirmPassword ? "status" : "alert"} className={`mt-1.5 block text-[11px] font-semibold ${profileNewPassword === profileConfirmPassword ? "text-emerald-700" : "text-rose-600"}`}>{profileNewPassword === profileConfirmPassword ? "Passwords match." : "Passwords do not match."}</span>}
+                        </label>)}
+                      </div>
+                      {profileNewPasswordCheck.value === profileNewPassword && profileNewPasswordCheck.message && <p
+                        role={profileNewPasswordCheck.state === "same" || profileNewPasswordCheck.state === "error" ? "alert" : "status"}
+                        className={`mt-2 text-[11px] font-semibold ${profileNewPasswordCheck.state === "different" ? "text-emerald-700" : profileNewPasswordCheck.state === "checking" || profileNewPasswordCheck.state === "incomplete" ? "text-black/40" : "text-rose-600"}`}
+                      >
+                        {profileNewPasswordCheck.message}
+                      </p>}
+                      <ul className="mt-3 space-y-1 text-[11px]" aria-label="Password requirements">
+                        {getPasswordRequirements(profileNewPassword).map(([requirement, met]) => <li key={requirement} className={met ? "font-semibold text-emerald-700" : "text-black/45"}>{met ? "✓" : "○"} {requirement}</li>)}
+                      </ul>
+                      {profileError && <p role="alert" className="mt-4 text-xs font-semibold text-rose-600">{profileError}</p>}
+                      <div className="mt-5 flex justify-end gap-2">
+                        <button type="button" disabled={profileSaving} onClick={() => { setProfileAction(""); setProfileError(""); }} className="rounded-xl border border-black/10 px-4 py-2.5 text-xs font-bold text-black/60 transition hover:bg-black/[.03] disabled:opacity-50">Cancel</button>
+                        <button type="submit" disabled={profileSaving || profileCurrentPasswordCheck.state !== "valid" || profileCurrentPasswordCheck.value !== profileCurrentPassword || profileNewPasswordCheck.state !== "different" || profileNewPasswordCheck.value !== profileNewPassword || !profileConfirmPassword || profileNewPassword !== profileConfirmPassword} className="rounded-xl bg-[#756FB8] px-4 py-2.5 text-xs font-bold text-white transition hover:bg-[#625CA4] disabled:cursor-not-allowed disabled:opacity-50">{profileSaving ? "Updating..." : "Update password"}</button>
+                      </div>
+                    </form> : <>
+                      <h3 className="text-sm font-extrabold">Account information</h3>
+                      <dl className="mt-5 space-y-4">
+                        <div><dt className="text-[11px] font-semibold text-black/40">Full name</dt><dd className="mt-1 text-sm font-bold">{user.name}</dd></div>
+                        <div><dt className="text-[11px] font-semibold text-black/40">Email address</dt><dd className="mt-1 break-all text-sm font-bold">{user.email}</dd></div>
+                      </dl>
+                      <p className="mt-6 rounded-xl bg-[#F8F6F3] p-4 text-xs leading-5 text-black/50">Your email is used to sign in and cannot be changed here.</p>
+                      {profileMessage && <p role="status" className="mt-4 text-xs font-semibold text-emerald-700">{profileMessage}</p>}
+                    </>}
+                  </div>
+                </div>
+                {profileMessage && profileAction && <p role="status" className="mt-4 text-xs font-semibold text-emerald-700">{profileMessage}</p>}
               </section>
             </div>
           )}
