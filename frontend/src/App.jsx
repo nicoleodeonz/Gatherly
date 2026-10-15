@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "./api.js";
+import AdminDashboard from "./AdminDashboard.jsx";
 import PublicEventPage from "./PublicEventPage.jsx";
 
 function Icon({ name, className = "size-5" }) {
@@ -234,6 +235,468 @@ function buildRevenueGrowth(orders, period, now) {
   return buckets;
 }
 
+function escapeExportText(value) {
+  return String(value ?? "");
+}
+
+function downloadOrganizerBlob(content, mimeType, fileName) {
+  const url = URL.createObjectURL(new Blob([content], { type: mimeType }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function createOrganizerAnalyticsTables({
+  selectedAnalyticsEvent,
+  revenueAnalyticsPeriod,
+  revenueGrowth,
+  analyticsPeriod,
+  registrationGrowth,
+  analyticsEvents,
+  analyticsAttendees,
+  checkInSummary,
+  checkInRate,
+  discoverySourceCounts,
+}) {
+  const eventName = selectedAnalyticsEvent?.name || "All visible published events";
+  return [
+    {
+      name: "Revenue Analytics",
+      rows: [
+        ["Event scope", eventName],
+        ["Grouping", revenueAnalyticsPeriod],
+        [],
+        ["Time bucket", "Paid revenue (PHP)"],
+        ...revenueGrowth.map(({ label, revenue }) => [label, Math.round(revenue * 100) / 100]),
+      ],
+    },
+    {
+      name: "Registration Growth",
+      rows: [
+        ["Event scope", eventName],
+        ["Grouping", analyticsPeriod],
+        [],
+        ["Time bucket", "Registrations"],
+        ...registrationGrowth.map(({ label, registrations }) => [label, registrations]),
+      ],
+    },
+    {
+      name: "Ticket Performance",
+      rows: [
+        ["Event", "Tickets sold", "Capacity", "Sold (%)"],
+        ...analyticsEvents.map((event) => [
+          event.name || "Untitled event",
+          event.sold,
+          event.total,
+          event.total > 0 ? Math.round((event.sold / event.total) * 100) : 0,
+        ]),
+      ],
+    },
+    {
+      name: "Check-in Activity",
+      rows: [
+        ["Attendance status", "Attendees"],
+        ["Checked in", checkInSummary.checkedIn],
+        ["No-shows", checkInSummary.noShow],
+        ["Not checked in yet", checkInSummary.notYetCheckedIn],
+        ["Total attendees", analyticsAttendees.length],
+        ["Check-in rate (%)", checkInRate],
+      ],
+    },
+    {
+      name: "Discovery Sources",
+      rows: [
+        ["Source", "Attendees", "Share (%)"],
+        ...discoverySourceCounts.map(({ label, count }) => [
+          label,
+          count,
+          analyticsAttendees.length ? Math.round((count / analyticsAttendees.length) * 100) : 0,
+        ]),
+      ],
+    },
+  ];
+}
+
+function downloadOrganizerCsv(tables, fileName = "gatherly-organizer-analytics.csv") {
+  const encodeCell = (value) => {
+    const text = escapeExportText(value);
+    const safeText = /^[\s]*[=+\-@]/.test(text) ? `'${text}` : text;
+    return `"${safeText.replace(/"/g, '""')}"`;
+  };
+  const csv = tables.flatMap(({ name, rows }) => [[name], ...rows, []])
+    .map((row) => row.map(encodeCell).join(","))
+    .join("\r\n");
+  downloadOrganizerBlob(`\uFEFF${csv}`, "text/csv;charset=utf-8", fileName);
+}
+
+function downloadOrganizerXls(tables, fileName = "gatherly-organizer-analytics.xls") {
+  const encodeXml = (value) => escapeExportText(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+  const worksheets = tables.map(({ name, rows }) => {
+    const worksheetRows = rows.map((row) => `<Row>${row.map((value) => {
+      const type = typeof value === "number" && Number.isFinite(value) ? "Number" : "String";
+      return `<Cell><Data ss:Type="${type}">${encodeXml(value)}</Data></Cell>`;
+    }).join("")}</Row>`).join("");
+    return `<Worksheet ss:Name="${encodeXml(name.slice(0, 31))}"><Table>${worksheetRows}</Table></Worksheet>`;
+  }).join("");
+  const workbook = `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet" xmlns:html="http://www.w3.org/TR/REC-html40">${worksheets}</Workbook>`;
+  downloadOrganizerBlob(`\uFEFF${workbook}`, "application/vnd.ms-excel;charset=utf-8", fileName);
+}
+
+function createOrganizerManagementTables(section, records) {
+  const formatDateTime = (value) => {
+    if (!value) return "";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+      ? String(value)
+      : new Intl.DateTimeFormat("en-PH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Manila" }).format(date);
+  };
+  if (section === "Events") {
+    return [{
+      name: "Events",
+      rows: [
+        ["Event code", "Event", "Venue", "Category", "Start date", "End date", "Time", "Tickets sold", "Capacity", "Status"],
+        ...records.map((event) => [
+          event.eventCode || "",
+          event.name || "Untitled event",
+          event.venue || "",
+          event.category || "",
+          event.date || "",
+          event.multipleDay ? event.endDate || "" : "",
+          event.time || "",
+          Number(event.sold) || 0,
+          Number(event.total) || 0,
+          event.status || "",
+        ]),
+      ],
+    }];
+  }
+  if (section === "Orders") {
+    return [{
+      name: "Orders",
+      rows: [
+        ["Order number", "Buyer", "Email", "Event", "Ticket", "Amount", "Status", "Ordered at"],
+        ...records.map((order) => [
+          order.number || "",
+          order.buyer || "",
+          order.email || "",
+          order.event || "",
+          order.ticket || "",
+          order.amount || "",
+          order.status || "",
+          formatDateTime(order.createdAt),
+        ]),
+      ],
+    }];
+  }
+  return [{
+    name: "Attendees",
+    rows: [
+      ["Attendee", "Email", "Ticket", "Event", "Event date", "Check-in status", "Discovery source", "Order number", "Registered at"],
+      ...records.map((attendee) => [
+        attendee.name || "",
+        attendee.email || "",
+        attendee.ticket || "",
+        attendee.event || "",
+        attendee.date || "",
+        attendee.checkedIn ? "Checked in" : "Not checked in",
+        attendee.discoverySource || "",
+        attendee.orderNumber || "",
+        formatDateTime(attendee.createdAt),
+      ]),
+    ],
+  }];
+}
+
+function organizerPdfText(value) {
+  return escapeExportText(value)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\x20-\x7E]/g, "?")
+    .replace(/([\\()])/g, "\\$1");
+}
+
+function organizerPdfLabel(commands, value, x, y, size = 9, bold = false, color = "0.16 0.17 0.23") {
+  commands.push(`${color} rg BT /${bold ? "F2" : "F1"} ${size} Tf ${x.toFixed(2)} ${y.toFixed(2)} Td (${organizerPdfText(value)}) Tj ET`);
+}
+
+function drawOrganizerPdfHeader(commands, title, subtitle) {
+  commands.push("0.46 0.42 0.72 rg 40 724 532 48 re f");
+  organizerPdfLabel(commands, "GATHERLY  /  ORGANIZER ANALYTICS", 54, 754, 8, true, "1 1 1");
+  organizerPdfLabel(commands, title, 54, 735, 15, true, "1 1 1");
+  if (subtitle) organizerPdfLabel(commands, subtitle, 48, 704, 9, false, "0.42 0.42 0.47");
+}
+
+function downloadOrganizerTablePdf({ title, tables }) {
+  const pages = [];
+  tables.forEach(({ name, rows }) => {
+    const header = rows[0] || [];
+    const dataRows = rows.slice(1);
+    const landscape = header.length >= 6;
+    const pageWidth = landscape ? 792 : 612;
+    const pageHeight = landscape ? 612 : 792;
+    const margin = 40;
+    const tableWidth = pageWidth - margin * 2;
+    const rowHeight = landscape ? 19 : 24;
+    const rowsPerPage = landscape ? 18 : 23;
+    const chunks = dataRows.length
+      ? Array.from({ length: Math.ceil(dataRows.length / rowsPerPage) }, (_, index) => dataRows.slice(index * rowsPerPage, (index + 1) * rowsPerPage))
+      : [[]];
+    chunks.forEach((chunk, chunkIndex) => {
+      const commands = [];
+      const headerRectY = pageHeight - 68;
+      commands.push(`0.46 0.42 0.72 rg ${margin} ${headerRectY} ${tableWidth} 48 re f`);
+      organizerPdfLabel(commands, "GATHERLY  /  ORGANIZER WORKSPACE", margin + 14, pageHeight - 38, 8, true, "1 1 1");
+      organizerPdfLabel(commands, title, margin + 14, pageHeight - 57, 15, true, "1 1 1");
+      const tableTitleY = headerRectY - 24;
+      organizerPdfLabel(commands, `${name}${chunks.length > 1 ? ` (continued ${chunkIndex + 1}/${chunks.length})` : ""}`, margin, tableTitleY, 12, true);
+
+      const columnWidth = tableWidth / Math.max(header.length, 1);
+      const headerY = tableTitleY - 27;
+      commands.push(`0.94 0.93 0.97 rg ${margin} ${headerY - 8} ${tableWidth} 22 re f`);
+      header.forEach((cell, columnIndex) => {
+        const maxLength = Math.max(6, Math.floor((columnWidth - 12) / 4.2));
+        const text = String(cell ?? "");
+        organizerPdfLabel(commands, text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text, margin + 6 + columnIndex * columnWidth, headerY, 8, true, "0.28 0.25 0.47");
+      });
+      if (!chunk.length) {
+        organizerPdfLabel(commands, "No matching records.", margin + 8, headerY - 28, 9, false, "0.42 0.42 0.47");
+      }
+      chunk.forEach((row, rowIndex) => {
+        const rowY = headerY - 24 - rowIndex * rowHeight;
+        if (rowIndex % 2 === 0) commands.push(`0.985 0.98 0.99 rg ${margin} ${rowY - 7} ${tableWidth} ${rowHeight} re f`);
+        row.forEach((cell, columnIndex) => {
+          const maxLength = Math.max(6, Math.floor((columnWidth - 12) / 3.8));
+          const text = String(cell ?? "");
+          organizerPdfLabel(commands, text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text, margin + 6 + columnIndex * columnWidth, rowY, 7, false);
+        });
+      });
+      pages.push({ commands, pageWidth, pageHeight });
+    });
+  });
+
+  const objects = [];
+  objects[1] = "<< /Type /Catalog /Pages 2 0 R >>";
+  objects[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+  objects[4] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>";
+  const pageReferences = [];
+  pages.forEach(({ commands, pageWidth, pageHeight }, index) => {
+    organizerPdfLabel(commands, "GATHERLY  |  ORGANIZER DATA EXPORT", 40, 28, 8, true, "0.52 0.50 0.60");
+    organizerPdfLabel(commands, `${index + 1} / ${pages.length}`, pageWidth - 72, 28, 8, false, "0.52 0.50 0.60");
+    const contentId = 5 + index * 2;
+    const pageId = contentId + 1;
+    const stream = commands.join("\n");
+    objects[contentId] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+    objects[pageId] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>`;
+    pageReferences.push(`${pageId} 0 R`);
+  });
+  objects[2] = `<< /Type /Pages /Kids [${pageReferences.join(" ")}] /Count ${pages.length} >>`;
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (let id = 1; id < objects.length; id += 1) {
+    offsets[id] = pdf.length;
+    pdf += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+  }
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length}\n0000000000 65535 f \n`;
+  for (let id = 1; id < objects.length; id += 1) pdf += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
+  pdf += `trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  downloadOrganizerBlob(pdf, "application/pdf", `gatherly-organizer-${title.toLowerCase()}.pdf`);
+}
+
+function drawOrganizerPdfLineChart(commands, { title, period, buckets, valueKey, top, formatValue = (value) => String(value) }) {
+  organizerPdfLabel(commands, title, 48, top, 12, true);
+  const values = buckets.map((bucket) => Number(bucket[valueKey]) || 0);
+  const maximum = Math.max(...values, 1);
+  const left = 78;
+  const right = 558;
+  const chartTop = top - 30;
+  const chartBottom = top - 135;
+  const points = buckets.map((bucket, index) => ({
+    x: left + (buckets.length > 1 ? index * ((right - left) / (buckets.length - 1)) : (right - left) / 2),
+    y: chartBottom + (values[index] / maximum) * (chartTop - chartBottom),
+    label: bucket.label,
+    value: values[index],
+  }));
+  [0, maximum / 2, maximum].forEach((tickValue) => {
+    const y = chartBottom + (tickValue / maximum) * (chartTop - chartBottom);
+    commands.push(`0.88 0.87 0.86 RG 0.5 w ${left} ${y.toFixed(2)} m ${right} ${y.toFixed(2)} l S`);
+    organizerPdfLabel(commands, formatValue(tickValue), 48, y - 3, 7, false, "0.42 0.42 0.47");
+  });
+  if (points.length > 1) {
+    commands.push(`0.46 0.42 0.72 RG 2 w 1 J 1 j ${points[0].x.toFixed(2)} ${points[0].y.toFixed(2)} m`);
+    points.slice(1).forEach((point) => commands.push(`${point.x.toFixed(2)} ${point.y.toFixed(2)} l`));
+    commands.push("S");
+  }
+  points.forEach((point, index) => {
+    commands.push(`0.46 0.42 0.72 rg ${point.x - 2} ${point.y - 2} 4 4 re f`);
+    if (period !== "day" || index % 3 === 0 || index === points.length - 1) {
+      organizerPdfLabel(commands, point.label, Math.max(left, Math.min(right - 36, point.x - 15)), chartBottom - 13, 7, false, "0.42 0.42 0.47");
+    }
+  });
+}
+
+function drawOrganizerPdfBars(commands, { title, items, top, maximumRows = 14 }) {
+  organizerPdfLabel(commands, title, 48, top, 12, true);
+  const visibleItems = items.slice(0, maximumRows);
+  const maximum = Math.max(1, ...visibleItems.map((item) => item.value));
+  visibleItems.forEach((item, index) => {
+    const y = top - 25 - index * 27;
+    const label = item.label.length > 48 ? `${item.label.slice(0, 45)}...` : item.label;
+    organizerPdfLabel(commands, label, 48, y, 8, true);
+    organizerPdfLabel(commands, String(item.value), 544, y, 8, true);
+    commands.push(`0.93 0.92 0.91 rg 48 ${y - 12} 512 6 re f`);
+    commands.push(`0.46 0.42 0.72 rg 48 ${y - 12} ${(512 * item.value / maximum).toFixed(2)} 6 re f`);
+  });
+  return visibleItems.length;
+}
+
+function drawOrganizerPdfParagraph(commands, text, x, y, maxCharacters, size = 10) {
+  const words = String(text)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\x20-\x7E]/g, "?")
+    .split(/\s+/);
+  let line = "";
+  let currentY = y;
+  words.forEach((word) => {
+    const candidate = line ? `${line} ${word}` : word;
+    if (candidate.length > maxCharacters && line) {
+      organizerPdfLabel(commands, line, x, currentY, size);
+      currentY -= size + 4;
+      line = word;
+    } else {
+      line = candidate;
+    }
+  });
+  if (line) {
+    organizerPdfLabel(commands, line, x, currentY, size);
+    currentY -= size + 4;
+  }
+  return currentY;
+}
+
+function drawOrganizerPdfSummarySection(commands, title, items, startY) {
+  organizerPdfLabel(commands, title, 48, startY, 14, true);
+  let currentY = startY - 23;
+  if (!items.length) {
+    organizerPdfLabel(commands, "No additional notes.", 56, currentY, 9, false, "0.42 0.42 0.47");
+    return currentY - 18;
+  }
+  items.forEach((item) => {
+    organizerPdfLabel(commands, "-", 52, currentY, 10, true, "0.46 0.42 0.72");
+    currentY = drawOrganizerPdfParagraph(commands, item, 67, currentY, 88, 9) - 5;
+  });
+  return currentY - 10;
+}
+
+function downloadOrganizerAnalyticsPdf({ tables, revenueGrowth, revenueAnalyticsPeriod, registrationGrowth, analyticsPeriod, checkInSummary, report }) {
+  const pages = [];
+  const generatedAt = new Intl.DateTimeFormat("en-PH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Manila" }).format(new Date());
+  const trends = [];
+  drawOrganizerPdfHeader(trends, "Analytics trends", "Paid revenue and attendee registrations");
+  drawOrganizerPdfLineChart(trends, {
+    title: "Revenue analytics (PHP)",
+    period: revenueAnalyticsPeriod,
+    buckets: revenueGrowth,
+    valueKey: "revenue",
+    top: 665,
+    formatValue: (value) => `PHP ${Math.round(value).toLocaleString("en-PH")}`,
+  });
+  drawOrganizerPdfLineChart(trends, {
+    title: "Registration growth",
+    period: analyticsPeriod,
+    buckets: registrationGrowth,
+    valueKey: "registrations",
+    top: 480,
+  });
+  pages.push(trends);
+
+  const performanceRows = tables.find(({ name }) => name === "Ticket Performance").rows.slice(1);
+  const performancePageCount = Math.max(1, Math.ceil(performanceRows.length / 14));
+  for (let pageIndex = 0; pageIndex < performancePageCount; pageIndex += 1) {
+    const performance = [];
+    drawOrganizerPdfHeader(performance, "Ticket performance", "Tickets sold compared with capacity");
+    const eventRows = performanceRows.slice(pageIndex * 14, (pageIndex + 1) * 14);
+    const rowsDrawn = drawOrganizerPdfBars(performance, {
+      title: pageIndex === 0 ? "Tickets sold by event" : "Tickets sold by event (continued)",
+      items: eventRows.map(([label, sold, capacity, percentage]) => ({
+        label: `${label} (${sold}/${capacity})`,
+        value: Number(percentage) || 0,
+      })),
+      top: 670,
+      maximumRows: 14,
+    });
+    if (pageIndex === 0) {
+      const attendanceItems = [
+        { label: "Checked in", value: checkInSummary.checkedIn },
+        { label: "No-shows", value: checkInSummary.noShow },
+        { label: "Not checked in yet", value: checkInSummary.notYetCheckedIn },
+      ];
+      drawOrganizerPdfBars(performance, { title: "Check-in activity", items: attendanceItems, top: 635 - rowsDrawn * 27, maximumRows: 3 });
+    }
+    pages.push(performance);
+  }
+
+  const sourceRows = tables.find(({ name }) => name === "Discovery Sources").rows.slice(1);
+  const sourcePageCount = Math.max(1, Math.ceil(sourceRows.length / 22));
+  for (let pageIndex = 0; pageIndex < sourcePageCount; pageIndex += 1) {
+    const sources = [];
+    drawOrganizerPdfHeader(sources, "Attendee discovery sources", "How attendees found your events");
+    drawOrganizerPdfBars(sources, {
+      title: pageIndex === 0 ? "Registration sources" : "Registration sources (continued)",
+      items: sourceRows.slice(pageIndex * 22, (pageIndex + 1) * 22)
+        .map(([label, value]) => ({ label, value: Number(value) || 0 })),
+      top: 670,
+      maximumRows: 22,
+    });
+    pages.push(sources);
+  }
+
+  const summary = [];
+  drawOrganizerPdfHeader(summary, "Final summary", `AI-assisted review | ${generatedAt}`);
+  organizerPdfLabel(summary, "Performance overview", 48, 665, 14, true);
+  let summaryY = drawOrganizerPdfParagraph(summary, report.executiveSummary, 48, 642, 88, 10) - 14;
+  summaryY = drawOrganizerPdfSummarySection(summary, "Highlights", report.highlights, summaryY);
+  summaryY = drawOrganizerPdfSummarySection(summary, "Risks", report.risks, summaryY);
+  drawOrganizerPdfSummarySection(summary, "Recommended actions", report.recommendations, summaryY);
+  pages.push(summary);
+
+  const objects = [];
+  objects[1] = "<< /Type /Catalog /Pages 2 0 R >>";
+  objects[3] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+  objects[4] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>";
+  const pageReferences = [];
+  pages.forEach((commands, index) => {
+    organizerPdfLabel(commands, "GATHERLY  |  ORGANIZER ANALYTICS", 40, 30, 8, true, "0.52 0.50 0.60");
+    organizerPdfLabel(commands, `${index + 1} / ${pages.length}`, 540, 30, 8, false, "0.52 0.50 0.60");
+    const contentId = 5 + index * 2;
+    const pageId = contentId + 1;
+    const stream = commands.join("\n");
+    objects[contentId] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+    objects[pageId] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentId} 0 R >>`;
+    pageReferences.push(`${pageId} 0 R`);
+  });
+  objects[2] = `<< /Type /Pages /Kids [${pageReferences.join(" ")}] /Count ${pages.length} >>`;
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  for (let id = 1; id < objects.length; id += 1) {
+    offsets[id] = pdf.length;
+    pdf += `${id} 0 obj\n${objects[id]}\nendobj\n`;
+  }
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length}\n0000000000 65535 f \n`;
+  for (let id = 1; id < objects.length; id += 1) pdf += `${String(offsets[id]).padStart(10, "0")} 00000 n \n`;
+  pdf += `trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  downloadOrganizerBlob(pdf, "application/pdf", "gatherly-organizer-analytics.pdf");
+}
+
 function toTimeInputValue(value) {
   const match = value.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
   if (!match) return /^\d{2}:\d{2}$/.test(value) ? value : "";
@@ -260,16 +723,16 @@ function hasEventEnded(event) {
   return hasEventEndedAt(event, Date.now());
 }
 
-function DashboardSidebar({ active, setActive, mobileOpen, setMobileOpen, onHome, onHelp, onSettings, orderCount }) {
+function DashboardSidebar({ active, setActive, mobileOpen, setMobileOpen, onHelp, onSettings, orderCount }) {
   return (
     <aside className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col bg-[#2D3142] text-white transition-transform duration-300 lg:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"}`}>
       <div className="flex h-20 items-center justify-between px-7">
-        <button className="flex items-center gap-3" onClick={onHome} aria-label="Back to Gatherly home">
+        <div className="flex items-center gap-3" aria-label="Gatherly">
           <div className="grid size-9 place-items-center rounded-xl bg-[#756FB8] shadow-[0_8px_24px_rgba(114,87,245,.35)]">
             <div className="size-3 rotate-45 rounded-[3px] border-2 border-white" />
           </div>
           <span className="text-xl font-extrabold tracking-tight">Gatherly</span>
-        </button>
+        </div>
         <button className="rounded-lg p-2 text-white/60 hover:bg-white/10 lg:hidden" onClick={() => setMobileOpen(false)} aria-label="Close menu"><Icon name="close" /></button>
       </div>
       <div className="px-4 pt-5">
@@ -296,7 +759,7 @@ function DashboardSidebar({ active, setActive, mobileOpen, setMobileOpen, onHome
   );
 }
 
-function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
+function Dashboard({ user, onSignOut, onUserUpdate }) {
   const [active, setActive] = useState("Overview");
   const [events, setEvents] = useState([]);
   const [search, setSearch] = useState("");
@@ -354,6 +817,11 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
   const [page, setPage] = useState(1);
   const [analyticsPeriod, setAnalyticsPeriod] = useState("day");
   const [revenueAnalyticsPeriod, setRevenueAnalyticsPeriod] = useState("day");
+  const [organizerAnalyticsExportOpen, setOrganizerAnalyticsExportOpen] = useState(false);
+  const [organizerAnalyticsExporting, setOrganizerAnalyticsExporting] = useState(false);
+  const [organizerAnalyticsExportError, setOrganizerAnalyticsExportError] = useState("");
+  const [organizerTableExportOpen, setOrganizerTableExportOpen] = useState(false);
+  const [organizerTableExportError, setOrganizerTableExportError] = useState("");
   const [analyticsEventTab, setAnalyticsEventTab] = useState("overview");
   const [hiddenAnalyticsEventCodes, setHiddenAnalyticsEventCodes] = useState([]);
   const [orders, setOrders] = useState([]);
@@ -799,6 +1267,108 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
   const analyticsCapacity = analyticsEvents.reduce((sum, event) => sum + event.total, 0);
   const analyticsRevenue = analyticsOrders.reduce((sum, order) => sum + Number(String(order.amount).replace(/[^\d.]/g, "")), 0);
   const currency = new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP", maximumFractionDigits: 0 });
+  const organizerAnalyticsTables = createOrganizerAnalyticsTables({
+    selectedAnalyticsEvent,
+    revenueAnalyticsPeriod,
+    revenueGrowth,
+    analyticsPeriod,
+    registrationGrowth,
+    analyticsEvents,
+    analyticsAttendees,
+    checkInSummary,
+    checkInRate,
+    discoverySourceCounts,
+  });
+  const organizerAnalyticsExport = async (format) => {
+    setOrganizerAnalyticsExportOpen(false);
+    setOrganizerAnalyticsExportError("");
+    if (format === "csv") {
+      downloadOrganizerCsv(organizerAnalyticsTables);
+    } else if (format === "xls") {
+      downloadOrganizerXls(organizerAnalyticsTables);
+    } else {
+      setOrganizerAnalyticsExporting(true);
+      try {
+        const report = await api("/organizer/analytics-report", {
+          method: "POST",
+          body: JSON.stringify({
+            scope: selectedAnalyticsEvent ? "selected event" : "all visible published events",
+            revenue: {
+              period: revenueAnalyticsPeriod,
+              buckets: revenueGrowth.map(({ label, revenue }) => ({ label, value: Math.round(revenue * 100) / 100 })),
+            },
+            registrations: {
+              period: analyticsPeriod,
+              buckets: registrationGrowth.map(({ label, registrations }) => ({ label, value: registrations })),
+            },
+            metrics: {
+              eventCount: analyticsEvents.length,
+              ticketsSold: analyticsTicketsSold,
+              ticketCapacity: analyticsCapacity,
+              attendees: analyticsAttendees.length,
+              checkedIn: checkInSummary.checkedIn,
+              noShows: checkInSummary.noShow,
+              notYetCheckedIn: checkInSummary.notYetCheckedIn,
+              checkInRate,
+              revenue: analyticsRevenue,
+            },
+            ticketPerformance: analyticsEvents.map(({ sold, total }) => ({ sold, capacity: total })),
+            discoverySources: discoverySourceCounts.map(({ count }) => count),
+          }),
+        });
+        downloadOrganizerAnalyticsPdf({
+          tables: organizerAnalyticsTables,
+          revenueGrowth,
+          revenueAnalyticsPeriod,
+          registrationGrowth,
+          analyticsPeriod,
+          checkInSummary,
+          report,
+        });
+      } catch (error) {
+        setOrganizerAnalyticsExportError(`Could not export organizer analytics PDF: ${error.message}`);
+      } finally {
+        setOrganizerAnalyticsExporting(false);
+      }
+    }
+  };
+  const organizerTableExport = (format) => {
+    setOrganizerTableExportOpen(false);
+    setOrganizerTableExportError("");
+    const title = active;
+    const records = active === "Events" ? filtered : active === "Orders" ? visibleOrders : visibleAttendees;
+    try {
+      const tables = createOrganizerManagementTables(title, records);
+      const fileName = `gatherly-organizer-${title.toLowerCase()}`;
+      if (format === "csv") {
+        downloadOrganizerCsv(tables, `${fileName}.csv`);
+      } else if (format === "xls") {
+        downloadOrganizerXls(tables, `${fileName}.xls`);
+      } else {
+        downloadOrganizerTablePdf({ title, tables });
+      }
+    } catch (error) {
+      setOrganizerTableExportError(`Could not export ${title.toLowerCase()} ${format.toUpperCase()}: ${error.message}`);
+    }
+  };
+  const renderOrganizerTableExportMenu = () => (
+    <div className="relative">
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={organizerTableExportOpen}
+        onClick={() => setOrganizerTableExportOpen((open) => !open)}
+        className="h-11 shrink-0 rounded-xl border border-black/[.08] bg-white px-4 text-xs font-bold text-[#756FB8] transition hover:bg-[#F8F6F3]"
+      >
+        Export
+      </button>
+      {organizerTableExportOpen && <div role="menu" aria-label={`Export ${active.toLowerCase()}`} className="absolute right-0 top-full z-30 mt-2 min-w-44 rounded-xl border border-black/[.08] bg-white p-1.5 shadow-xl">
+        <button type="button" role="menuitem" onClick={() => organizerTableExport("pdf")} className="w-full rounded-lg px-3 py-2.5 text-left text-xs font-semibold hover:bg-[#F8F6F3]">Export PDF</button>
+        <button type="button" role="menuitem" onClick={() => organizerTableExport("csv")} className="w-full rounded-lg px-3 py-2.5 text-left text-xs font-semibold hover:bg-[#F8F6F3]">Export CSV</button>
+        <button type="button" role="menuitem" onClick={() => organizerTableExport("xls")} className="w-full rounded-lg px-3 py-2.5 text-left text-xs font-semibold hover:bg-[#F8F6F3]">Export Excel (.xls)</button>
+      </div>}
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-[#F7F4EF] text-[#2D3142]">
@@ -807,7 +1377,6 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
         setActive={setActive}
         mobileOpen={mobileOpen}
         setMobileOpen={setMobileOpen}
-        onHome={onHome}
         onHelp={() => setUtilityModal("help")}
         onSettings={() => setUtilityModal("settings")}
         orderCount={orders.length}
@@ -835,10 +1404,11 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
         </header>
 
         <div className="mx-auto max-w-[1500px] px-5 py-8 sm:px-8 lg:px-10 lg:py-10">
+          {organizerTableExportError && <p role="alert" className="mb-5 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">{organizerTableExportError}</p>}
           <div className="mb-8 flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
             <div>
               <p className="mb-2 text-xs font-bold uppercase tracking-[.18em] text-[#756FB8]">Organizer workspace</p>
-              <h1 className="text-3xl font-extrabold tracking-[-.04em] sm:text-4xl">{active === "Overview" ? `Magandang umaga, ${firstName}.` : active}</h1>
+              <h1 className="text-3xl font-extrabold tracking-[-.04em] sm:text-4xl">{active === "Overview" ? `Good day, ${firstName}.` : active}</h1>
               <p className="mt-2 text-sm text-black/45">{active === "Overview" ? "Here’s what’s happening across your events." : `Manage your ${active.toLowerCase()} in one place.`}</p>
             </div>
             {(active === "Overview" || active === "Events") && <div className="flex flex-wrap gap-2">
@@ -848,7 +1418,27 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
               {active === "Events" && <button type="button" onClick={() => { setShowArchivedEvents((current) => !current); setFilter(archiveView ? "All events" : "All archived"); setPage(1); }} className="flex h-12 items-center justify-center gap-2 rounded-xl border border-black/[.08] bg-white px-5 text-sm font-bold text-[#2D3142] transition hover:bg-[#F8F6F3]">
                 <Icon name="archive" className="size-4" />{showArchivedEvents ? "Back to events" : "Archive"}
               </button>}
+              {active === "Events" && renderOrganizerTableExportMenu()}
             </div>}
+            {active === "Analytics" && <div className="relative self-start sm:self-end">
+              <button
+                type="button"
+                disabled={organizerAnalyticsExporting}
+                aria-busy={organizerAnalyticsExporting}
+                aria-haspopup="menu"
+                aria-expanded={organizerAnalyticsExportOpen}
+                onClick={() => setOrganizerAnalyticsExportOpen((open) => !open)}
+                className="rounded-lg border border-black/[.08] bg-white px-3 py-2 text-xs font-bold text-[#756FB8] transition hover:bg-[#F8F6F3] disabled:cursor-wait disabled:opacity-60"
+              >
+                {organizerAnalyticsExporting ? "Generating report..." : "Export"}
+              </button>
+              {organizerAnalyticsExportOpen && <div role="menu" aria-label="Export organizer analytics" className="absolute right-0 top-full z-30 mt-2 min-w-44 rounded-xl border border-black/[.08] bg-white p-1.5 shadow-xl">
+                <button type="button" role="menuitem" disabled={organizerAnalyticsExporting} onClick={() => organizerAnalyticsExport("pdf")} className="w-full rounded-lg px-3 py-2.5 text-left text-xs font-semibold hover:bg-[#F8F6F3] disabled:cursor-wait disabled:opacity-50">{organizerAnalyticsExporting ? "Generating PDF..." : "Export PDF"}</button>
+                <button type="button" role="menuitem" onClick={() => organizerAnalyticsExport("csv")} className="w-full rounded-lg px-3 py-2.5 text-left text-xs font-semibold hover:bg-[#F8F6F3]">Export CSV</button>
+                <button type="button" role="menuitem" onClick={() => organizerAnalyticsExport("xls")} className="w-full rounded-lg px-3 py-2.5 text-left text-xs font-semibold hover:bg-[#F8F6F3]">Export Excel (.xls)</button>
+              </div>}
+            </div>}
+            {(active === "Orders" || active === "Attendees") && renderOrganizerTableExportMenu()}
           </div>
 
           {active === "Overview" && <><section className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -949,6 +1539,7 @@ function Dashboard({ user, onHome, onSignOut, onUserUpdate }) {
           </section>}
 
           {active === "Analytics" && <section className="rounded-2xl border border-black/[.055] bg-white p-6 sm:p-8">
+            {organizerAnalyticsExportError && <p role="alert" className="mb-5 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">{organizerAnalyticsExportError}</p>}
             <div className="flex items-center gap-2 border-b border-black/[.07]">
               <div role="tablist" aria-label="Choose event analytics" className="flex min-w-0 flex-1 gap-2 overflow-x-auto">
               <button
@@ -1957,7 +2548,7 @@ function Landing({ onEnter, initialError }) {
           password: submittedPassword,
         }),
       });
-      onEnter(result.user);
+      onEnter(result.user, registering ? "" : submittedPassword);
       setAuthOpen(false);
     } catch (error) {
       if (error.status === 409 && registering) setEmailRegistered(true);
@@ -2265,16 +2856,79 @@ function Landing({ onEnter, initialError }) {
   );
 }
 
+function RequiredPasswordChange({ user, temporaryPassword, onPasswordChanged, onSignOut }) {
+  const [currentPassword, setCurrentPassword] = useState(temporaryPassword);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordVisibility, setPasswordVisibility] = useState({ current: false, new: false, confirm: false });
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function submitPasswordChange(event) {
+    event.preventDefault();
+    setError("");
+    if (!getPasswordRequirements(newPassword).every(([, met]) => met)) {
+      setError("Meet all password requirements before continuing.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError("The new passwords do not match.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api("/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({ currentPassword, newPassword, confirmNewPassword: confirmPassword }),
+      });
+      onPasswordChanged();
+    } catch (requestError) {
+      setError(requestError.message);
+      if (requestError.status === 401) setCurrentPassword("");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <main className="grid min-h-screen place-items-center bg-[#F7F4EF] px-4 py-10 text-[#2D3142]">
+      <section className="w-full max-w-lg rounded-3xl border border-black/[.055] bg-white p-7 shadow-[0_18px_60px_rgba(20,18,26,.08)] sm:p-9">
+        <div className="grid size-11 place-items-center rounded-xl bg-[#756FB8] text-lg font-extrabold text-white">G</div>
+        <p className="mt-7 text-xs font-bold uppercase tracking-[.16em] text-[#756FB8]">Secure your account</p>
+        <h1 className="mt-2 text-2xl font-extrabold tracking-tight">Change your temporary password</h1>
+        <p className="mt-3 text-sm leading-6 text-black/50">Welcome, {user.name}. Choose a new password before continuing to Gatherly.</p>
+        <form onSubmit={submitPasswordChange} className="mt-6 space-y-4">
+          {!temporaryPassword && <label className="block"><span className="mb-2 block text-xs font-bold">Temporary password</span><span className="relative block"><input required type={passwordVisibility.current ? "text" : "password"} autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="h-12 w-full rounded-xl border border-black/10 px-4 pr-12 text-sm outline-none focus:border-[#756FB8]" /><button type="button" onClick={() => setPasswordVisibility((current) => ({ ...current, current: !current.current }))} aria-label={`${passwordVisibility.current ? "Hide" : "Show"} temporary password`} aria-pressed={passwordVisibility.current} className="absolute inset-y-0 right-0 grid w-12 place-items-center rounded-r-xl text-black/45 transition hover:text-[#756FB8]"><Icon name={passwordVisibility.current ? "eyeOff" : "eye"} className="size-[18px]" /></button></span></label>}
+          <label className="block"><span className="mb-2 block text-xs font-bold">New password</span><span className="relative block"><input required type={passwordVisibility.new ? "text" : "password"} minLength={8} maxLength={128} autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="h-12 w-full rounded-xl border border-black/10 px-4 pr-12 text-sm outline-none focus:border-[#756FB8]" /><button type="button" onClick={() => setPasswordVisibility((current) => ({ ...current, new: !current.new }))} aria-label={`${passwordVisibility.new ? "Hide" : "Show"} new password`} aria-pressed={passwordVisibility.new} className="absolute inset-y-0 right-0 grid w-12 place-items-center rounded-r-xl text-black/45 transition hover:text-[#756FB8]"><Icon name={passwordVisibility.new ? "eyeOff" : "eye"} className="size-[18px]" /></button></span></label>
+          <ul className="space-y-1 text-[11px] text-black/50" aria-label="Password requirements">
+            {getPasswordRequirements(newPassword).map(([requirement, met]) => <li key={requirement} className={met ? "font-semibold text-emerald-700" : ""}>{met ? "✓" : "•"} {requirement}</li>)}
+          </ul>
+          <label className="block"><span className="mb-2 block text-xs font-bold">Confirm new password</span><span className="relative block"><input required type={passwordVisibility.confirm ? "text" : "password"} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} className="h-12 w-full rounded-xl border border-black/10 px-4 pr-12 text-sm outline-none focus:border-[#756FB8]" /><button type="button" onClick={() => setPasswordVisibility((current) => ({ ...current, confirm: !current.confirm }))} aria-label={`${passwordVisibility.confirm ? "Hide" : "Show"} confirm new password`} aria-pressed={passwordVisibility.confirm} className="absolute inset-y-0 right-0 grid w-12 place-items-center rounded-r-xl text-black/45 transition hover:text-[#756FB8]"><Icon name={passwordVisibility.confirm ? "eyeOff" : "eye"} className="size-[18px]" /></button></span></label>
+          {error && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-xs font-semibold text-rose-700">{error}</p>}
+          <button type="submit" disabled={saving} className="w-full rounded-xl bg-[#756FB8] py-3.5 text-sm font-bold text-white hover:bg-[#625CA4] disabled:opacity-50">{saving ? "Updating password…" : "Change password and continue"}</button>
+        </form>
+        <button type="button" onClick={onSignOut} className="mt-4 w-full text-center text-xs font-bold text-[#756FB8] hover:text-[#2D3142]">Sign out</button>
+      </section>
+    </main>
+  );
+}
+
 export default function App() {
   const publicEventMatch = window.location.pathname.match(/^\/events\/([A-Za-z0-9]{7})\/?$/);
   const publicEventCode = publicEventMatch?.[1];
+  const loggedOutStorageKey = "gatherly_logged_out";
   const [screen, setScreen] = useState("landing");
   const [user, setUser] = useState(null);
-  const [sessionChecked, setSessionChecked] = useState(Boolean(publicEventCode));
+  const [temporaryPassword, setTemporaryPassword] = useState("");
+  const [sessionChecked, setSessionChecked] = useState(
+    () => Boolean(publicEventCode) || window.localStorage.getItem(loggedOutStorageKey) === "true",
+  );
   const [sessionError, setSessionError] = useState("");
 
   useEffect(() => {
     if (publicEventCode) return undefined;
+    if (window.localStorage.getItem(loggedOutStorageKey) === "true") return undefined;
+
     let activeRequest = true;
     api("/auth/session")
       .then(({ user: sessionUser }) => {
@@ -2299,14 +2953,22 @@ export default function App() {
   }
 
   async function signOut() {
-    await api("/auth/logout", { method: "POST" });
+    window.localStorage.setItem(loggedOutStorageKey, "true");
     setUser(null);
+    setTemporaryPassword("");
     setSessionError("");
     setScreen("landing");
+    try {
+      await api("/auth/logout", { method: "POST" });
+    } catch {
+      setSessionError("You are signed out on this device, but Gatherly could not reach the server to invalidate your session. Sign out again once the backend is available.");
+    }
   }
 
-  function enterDashboard(sessionUser) {
+  function enterDashboard(sessionUser, submittedPassword = "") {
+    window.localStorage.removeItem(loggedOutStorageKey);
     setUser(sessionUser);
+    setTemporaryPassword(sessionUser.mustChangePassword ? submittedPassword : "");
     setSessionError("");
     setScreen("dashboard");
   }
@@ -2315,7 +2977,21 @@ export default function App() {
     return <PublicEventPage eventCode={publicEventCode} />;
   }
 
+  if (user?.mustChangePassword) {
+    return <RequiredPasswordChange
+      user={user}
+      temporaryPassword={temporaryPassword}
+      onPasswordChanged={() => {
+        setUser((current) => ({ ...current, mustChangePassword: false }));
+        setTemporaryPassword("");
+      }}
+      onSignOut={signOut}
+    />;
+  }
+
   return screen === "landing"
     ? <Landing onEnter={enterDashboard} initialError={sessionError} />
-    : <Dashboard user={user} onHome={() => setScreen("landing")} onSignOut={signOut} onUserUpdate={setUser} />;
+    : user.accountType === "admin"
+      ? <AdminDashboard user={user} onSignOut={signOut} />
+      : <Dashboard user={user} onSignOut={signOut} onUserUpdate={setUser} />;
 }

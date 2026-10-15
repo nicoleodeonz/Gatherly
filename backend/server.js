@@ -20,7 +20,10 @@ const emailJsServiceId = process.env.EMAILJS_SERVICE_ID;
 const emailJsPublicKey = process.env.EMAILJS_PUBLIC_KEY;
 const emailJsPrivateKey = process.env.EMAILJS_PRIVATE_KEY;
 const emailJsTicketTemplateId = process.env.EMAILJS_TICKET_TEMPLATE_ID || "template_3lusa0s";
+const emailJsOrganizerWelcomeTemplateId = "template_0ln8iuu";
 const geoapifyApiKey = process.env.GEOAPIFY_API_KEY;
+const groqApiKey = process.env.GROQ_API_KEY;
+const groqModel = process.env.GROQ_MODEL || "openai/gpt-oss-20b";
 const payMongoSecretKey = process.env.PAYMONGO_SECRET_KEY;
 const vercelDeploymentHost = process.env.VERCEL_ENV === "production"
   ? process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL
@@ -33,7 +36,7 @@ const verificationLifetimeMs = 10 * 60 * 1000;
 const verificationResendDelayMs = 60 * 1000;
 const verificationMaxAttempts = 5;
 const passwordResetLifetimeMs = 10 * 60 * 1000;
-const gatherlyProcessingFeeCents = 2500;
+const defaultProcessingFeeCents = 2500;
 const eventCodeCharacters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 if (!mongoUri) {
@@ -57,6 +60,25 @@ async function hashPassword(password) {
   return { passwordHash, passwordSalt: salt };
 }
 
+function createTemporaryPassword() {
+  const requiredCharacters = [
+    "ABCDEFGHJKLMNPQRSTUVWXYZ",
+    "abcdefghijkmnopqrstuvwxyz",
+    "23456789",
+    passwordSpecialCharacters,
+  ];
+  const characters = requiredCharacters.map((set) => set[crypto.randomInt(set.length)]);
+  const allCharacters = requiredCharacters.join("");
+  while (characters.length < 16) {
+    characters.push(allCharacters[crypto.randomInt(allCharacters.length)]);
+  }
+  for (let index = characters.length - 1; index > 0; index -= 1) {
+    const swapIndex = crypto.randomInt(index + 1);
+    [characters[index], characters[swapIndex]] = [characters[swapIndex], characters[index]];
+  }
+  return characters.join("");
+}
+
 async function verifyPassword(password, account) {
   if (!account?.passwordHash || !account.passwordSalt) {
     return false;
@@ -64,6 +86,15 @@ async function verifyPassword(password, account) {
   const candidateHash = await scrypt(password, account.passwordSalt, 64);
   const storedHash = Buffer.from(account.passwordHash, "hex");
   return candidateHash.length === storedHash.length && crypto.timingSafeEqual(candidateHash, storedHash);
+}
+
+async function getProcessingFeeCents(database) {
+  const settings = await database.collection("platform_settings").findOne({ _id: "platform" });
+  const feeCents = settings?.processingFeeCents ?? defaultProcessingFeeCents;
+  if (!Number.isSafeInteger(feeCents) || feeCents < 0) {
+    throw new Error("The configured Gatherly processing fee is invalid.");
+  }
+  return feeCents;
 }
 
 function getDatabase() {
@@ -96,6 +127,7 @@ function getDatabase() {
         await database.collection("events").createIndex({ eventCode: 1 }, { unique: true, sparse: true });
         await database.collection("ticket_orders").createIndex({ ownerId: 1 });
         await database.collection("attendees").createIndex({ ownerId: 1 });
+        await database.collection("attendees").createIndex({ createdAt: 1 });
         await database.collection("attendees").createIndex(
           { eventId: 1, email: 1 },
           { unique: true, partialFilterExpression: { eventId: { $type: "objectId" }, email: { $type: "string" } } },
@@ -155,33 +187,60 @@ app.use("/api", (req, res, next) => {
 
 function setSessionCookie(res, userId, accountType) {
   const token = jwt.sign({ sub: userId, accountType }, jwtSecret, { algorithm: "HS256", expiresIn: "7d" });
-  res.cookie("gatherly_session", token, {
+  const cookieOptions = {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
+  };
+  res.clearCookie("gatherly_session", { ...cookieOptions, path: "/api" });
+  res.cookie("gatherly_session", token, {
+    ...cookieOptions,
     maxAge: 7 * 24 * 60 * 60 * 1000,
-    path: "/api",
+    path: "/",
   });
 }
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const token = req.cookies.gatherly_session;
   if (!token) {
     return res.status(401).json({ error: "Please sign in to continue." });
   }
 
+  let payload;
   try {
-    const payload = jwt.verify(token, jwtSecret, { algorithms: ["HS256"] });
-    if (typeof payload.sub !== "string"
-      || !["customer", "admin"].includes(payload.accountType)) {
-      return res.status(401).json({ error: "Please sign in to continue." });
-    }
-    req.userId = payload.sub;
-    req.accountType = payload.accountType;
-    next();
+    payload = jwt.verify(token, jwtSecret, { algorithms: ["HS256"] });
   } catch {
-    res.status(401).json({ error: "Your session has expired. Please sign in again." });
+    return res.status(401).json({ error: "Your session has expired. Please sign in again." });
   }
+
+  if (typeof payload.sub !== "string" || !["customer", "admin"].includes(payload.accountType)) {
+    return res.status(401).json({ error: "Please sign in to continue." });
+  }
+
+  const collectionName = payload.accountType === "admin" ? "admin_accounts" : "customer_accounts";
+  const account = await req.db.collection(collectionName).findOne(
+    { _id: objectId(payload.sub) },
+    { projection: { disabledAt: 1, archivedAt: 1, mustChangePassword: 1 } },
+  );
+  if (!account) {
+    return res.status(401).json({ error: "Please sign in to continue." });
+  }
+  if (account.disabledAt || account.archivedAt) {
+    return res.status(403).json({ error: "This account has been disabled. Contact Gatherly support for assistance." });
+  }
+  if (account.mustChangePassword && req.path !== "/api/auth/change-password") {
+    return res.status(403).json({ error: "Change your temporary password to continue." });
+  }
+  req.userId = payload.sub;
+  req.accountType = payload.accountType;
+  return next();
+}
+
+function requireAdmin(req, res, next) {
+  if (req.accountType !== "admin") {
+    return res.status(403).json({ error: "Administrator access is required." });
+  }
+  return next();
 }
 
 function serialize(document) {
@@ -573,11 +632,20 @@ app.post("/api/auth/login", async (req, res) => {
     { account: customerAccount, accountType: "customer" },
   ];
   let authenticated;
+  let suspendedAccount;
   for (const candidate of candidates) {
-    if (await verifyPassword(password, candidate.account)) {
-      authenticated = candidate;
-      break;
+    if (!await verifyPassword(password, candidate.account)) continue;
+    if (candidate.account.disabledAt || candidate.account.archivedAt) {
+      suspendedAccount = candidate;
+      continue;
     }
+    authenticated = candidate;
+    break;
+  }
+  if (!authenticated && suspendedAccount) {
+    return res.status(403).json({
+      error: "Your account has been suspended, please contact our support.",
+    });
   }
   if (!authenticated) {
     return res.status(401).json({ error: "Email or password is incorrect." });
@@ -589,6 +657,7 @@ app.post("/api/auth/login", async (req, res) => {
       name: authenticated.account.name,
       email: authenticated.account.email,
       accountType: authenticated.accountType,
+      mustChangePassword: authenticated.account.mustChangePassword === true,
     },
   });
 });
@@ -785,7 +854,13 @@ app.post("/api/auth/password-reset/complete", async (req, res) => {
 });
 
 app.post("/api/auth/logout", (req, res) => {
-  res.clearCookie("gatherly_session", { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict", path: "/api" });
+  const cookieOptions = {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+  };
+  res.clearCookie("gatherly_session", { ...cookieOptions, path: "/" });
+  res.clearCookie("gatherly_session", { ...cookieOptions, path: "/api" });
   res.status(204).end();
 });
 
@@ -809,12 +884,30 @@ app.get("/api/auth/session", async (req, res) => {
   const collection = accountType === "admin" ? "admin_accounts" : "customer_accounts";
   const user = await req.db.collection(collection).findOne(
     { _id: id },
-    { projection: { name: 1, email: 1 } },
+    { projection: { name: 1, email: 1, disabledAt: 1, archivedAt: 1, mustChangePassword: 1 } },
   );
   if (!user) {
     return res.json({ user: null });
   }
-  res.json({ user: { name: user.name, email: user.email, accountType } });
+  if (user.disabledAt || user.archivedAt) {
+    const cookieOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+    };
+    res.clearCookie("gatherly_session", { ...cookieOptions, path: "/" });
+    res.clearCookie("gatherly_session", { ...cookieOptions, path: "/api" });
+    return res.json({ user: null });
+  }
+  setSessionCookie(res, user._id.toString(), accountType);
+  res.json({
+    user: {
+      name: user.name,
+      email: user.email,
+      accountType,
+      mustChangePassword: user.mustChangePassword === true,
+    },
+  });
 });
 
 app.patch("/api/auth/profile", requireAuth, async (req, res) => {
@@ -864,7 +957,7 @@ app.post("/api/auth/change-password", requireAuth, async (req, res) => {
 
   const update = await req.db.collection(collection).updateOne(
     { _id: objectId(req.userId), passwordHash: account.passwordHash, passwordSalt: account.passwordSalt },
-    { $set: await hashPassword(newPassword) },
+    { $set: await hashPassword(newPassword), $unset: { mustChangePassword: "" } },
   );
   if (update.matchedCount !== 1) {
     return res.status(409).json({ error: "Your password changed during this request. Please try again." });
@@ -872,7 +965,7 @@ app.post("/api/auth/change-password", requireAuth, async (req, res) => {
   res.json({ message: "Password changed successfully." });
 });
 
-function getPublicEvent(event) {
+function getPublicEvent(event, processingFeeCents) {
   return {
     eventCode: event.eventCode,
     name: event.name,
@@ -889,6 +982,7 @@ function getPublicEvent(event) {
     pricingMode: event.pricingMode || "free",
     priceCents: event.priceCents || 0,
     ticketTypes: event.ticketTypes || [],
+    processingFeeCents,
     available: Math.max(0, event.total - (event.sold || 0) - (event.reserved || 0)),
   };
 }
@@ -1305,7 +1399,7 @@ app.get("/api/public/events/:eventCode", async (req, res) => {
   if (!event) {
     return res.status(404).json({ error: "This published event could not be found." });
   }
-  return res.json(getPublicEvent(event));
+  return res.json(getPublicEvent(event, await getProcessingFeeCents(req.db)));
 });
 
 app.post("/api/public/events/:eventCode/register", async (req, res) => {
@@ -1338,7 +1432,8 @@ app.post("/api/public/events/:eventCode/register", async (req, res) => {
   }
 
   const totalCents = ticket.priceCents;
-  const processingFeeCents = totalCents > 0 ? gatherlyProcessingFeeCents : 0;
+  const configuredProcessingFeeCents = await getProcessingFeeCents(req.db);
+  const processingFeeCents = totalCents > 0 ? configuredProcessingFeeCents : 0;
   const totalChargedCents = totalCents + processingFeeCents;
   const orderNumber = createOrderNumber();
   const statusToken = crypto.randomBytes(24).toString("hex");
@@ -1586,6 +1681,646 @@ app.post("/api/public/orders/:orderToken/cancel", async (req, res) => {
 });
 
 app.use("/api", requireAuth);
+
+app.post("/api/organizer/analytics-report", async (req, res) => {
+  if (req.accountType !== "customer") {
+    return res.status(403).json({ error: "Organizer access is required." });
+  }
+  if (!groqApiKey) {
+    return res.status(503).json({ error: "AI report generation is unavailable. Configure GROQ_API_KEY on the backend." });
+  }
+
+  const payload = req.body;
+  const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
+  const isChart = (chart) => chart
+    && ["day", "week", "month"].includes(chart.period)
+    && Array.isArray(chart.buckets)
+    && chart.buckets.length <= 31
+    && chart.buckets.every((bucket) => bucket
+      && typeof bucket.label === "string"
+      && bucket.label.length <= 60
+      && Number.isFinite(bucket.value)
+      && bucket.value >= 0);
+  if (!payload
+    || !["selected event", "all visible published events"].includes(payload.scope)
+    || !isChart(payload.revenue)
+    || !isChart(payload.registrations)
+    || !payload.metrics
+    || ![
+      payload.metrics.eventCount,
+      payload.metrics.ticketsSold,
+      payload.metrics.ticketCapacity,
+      payload.metrics.attendees,
+      payload.metrics.checkedIn,
+      payload.metrics.noShows,
+      payload.metrics.notYetCheckedIn,
+    ].every(isCount)
+    || !Number.isSafeInteger(payload.metrics.checkInRate)
+    || payload.metrics.checkInRate < 0
+    || payload.metrics.checkInRate > 100
+    || !Number.isFinite(payload.metrics.revenue)
+    || payload.metrics.revenue < 0
+    || !Array.isArray(payload.ticketPerformance)
+    || payload.ticketPerformance.length > 200
+    || !payload.ticketPerformance.every((event) => event
+      && isCount(event.sold)
+      && isCount(event.capacity))
+    || !Array.isArray(payload.discoverySources)
+    || payload.discoverySources.length > 30
+    || !payload.discoverySources.every(isCount)) {
+    return res.status(400).json({ error: "The organizer analytics report data is invalid." });
+  }
+
+  const reportData = {
+    scope: payload.scope,
+    revenue: {
+      period: payload.revenue.period,
+      buckets: payload.revenue.buckets.map(({ label, value }) => ({ label, value })),
+    },
+    registrations: {
+      period: payload.registrations.period,
+      buckets: payload.registrations.buckets.map(({ label, value }) => ({ label, value })),
+    },
+    metrics: {
+      eventCount: payload.metrics.eventCount,
+      ticketsSold: payload.metrics.ticketsSold,
+      ticketCapacity: payload.metrics.ticketCapacity,
+      attendees: payload.metrics.attendees,
+      checkedIn: payload.metrics.checkedIn,
+      noShows: payload.metrics.noShows,
+      notYetCheckedIn: payload.metrics.notYetCheckedIn,
+      checkInRate: payload.metrics.checkInRate,
+      revenue: payload.metrics.revenue,
+    },
+    ticketPerformance: payload.ticketPerformance.map((event, index) => ({
+      label: `Event ${index + 1}`,
+      sold: event.sold,
+      capacity: event.capacity,
+    })),
+    discoverySources: payload.discoverySources.map((count, index) => ({
+      label: `Source ${index + 1}`,
+      attendees: count,
+    })),
+  };
+
+  let groqResponse;
+  try {
+    groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${groqApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: groqModel,
+        temperature: 0.2,
+        max_tokens: 1100,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: "Write the final summary section of a professional analytics report for an event organizer. Use only the supplied aggregate data for the organizer's selected event or visible published events. Do not infer causes or trends outside the supplied periods. Distinguish observed risks from speculation. Return only a JSON object with exactly these keys: executiveSummary (one or two concise sentences), highlights (up to 3 short strings), risks (up to 3 evidence-based strings or a string explaining insufficient data), recommendations (up to 3 practical data-grounded strings). Keep all fields concise.",
+          },
+          {
+            role: "user",
+            content: JSON.stringify(reportData),
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch (error) {
+    console.error("Groq organizer analytics report request failed:", error.message);
+    return res.status(502).json({ error: "The AI report service could not be reached. Please try again." });
+  }
+
+  if (!groqResponse.ok) {
+    let upstreamError;
+    try {
+      upstreamError = await groqResponse.json();
+    } catch {
+      upstreamError = null;
+    }
+    const errorCode = upstreamError?.error?.code;
+    console.error(`Groq organizer analytics report request failed with HTTP ${groqResponse.status}${errorCode ? ` (${errorCode})` : ""}.`);
+    if (errorCode === "model_not_found") {
+      return res.status(503).json({ error: "The configured Groq model is unavailable. Set GROQ_MODEL to a model enabled for your Groq account." });
+    }
+    return res.status(502).json({ error: "The AI report service could not generate a report. Please try again." });
+  }
+
+  let generatedReport;
+  try {
+    const responseData = await groqResponse.json();
+    generatedReport = JSON.parse(responseData.choices?.[0]?.message?.content || "");
+  } catch (error) {
+    console.error("Groq organizer analytics report response was invalid:", error.message);
+    return res.status(502).json({ error: "The AI report service returned an invalid report. Please try again." });
+  }
+
+  const validReportText = (value, maxLength) => typeof value === "string" && value.trim().length > 0 && value.length <= maxLength;
+  if (!generatedReport
+    || !validReportText(generatedReport.executiveSummary, 800)
+    || !Array.isArray(generatedReport.highlights)
+    || generatedReport.highlights.length > 3
+    || !generatedReport.highlights.every((item) => validReportText(item, 240))
+    || !Array.isArray(generatedReport.risks)
+    || generatedReport.risks.length > 3
+    || !generatedReport.risks.every((item) => validReportText(item, 240))
+    || !Array.isArray(generatedReport.recommendations)
+    || generatedReport.recommendations.length > 3
+    || !generatedReport.recommendations.every((item) => validReportText(item, 240))) {
+    console.error("Groq organizer analytics report response did not match the expected report schema.");
+    return res.status(502).json({ error: "The AI report service returned an invalid report. Please try again." });
+  }
+
+  return res.json({
+    executiveSummary: generatedReport.executiveSummary.trim(),
+    highlights: generatedReport.highlights.map((item) => item.trim()),
+    risks: generatedReport.risks.map((item) => item.trim()),
+    recommendations: generatedReport.recommendations.map((item) => item.trim()),
+  });
+});
+
+app.get("/workspace", requireAuth, requireAdmin, async (req, res) => {
+  const projection = { name: 1, email: 1, createdAt: 1, disabledAt: 1, archivedAt: 1 };
+  const [
+    customerAccounts,
+    adminAccounts,
+    events,
+    organizers,
+    customerCount,
+    eventsByStatus,
+    attendeeCount,
+    checkedInCount,
+    discoverySources,
+    paidOrders,
+    processingFeeCents,
+  ] = await Promise.all([
+    req.db.collection("customer_accounts").find({}, { projection }).sort({ createdAt: -1, _id: -1 }).toArray(),
+    req.db.collection("admin_accounts").find({}, { projection }).sort({ createdAt: -1, _id: -1 }).toArray(),
+    req.db.collection("events").find({}).sort({ _id: -1 }).toArray(),
+    req.db.collection("customer_accounts").find({}, { projection: { name: 1, email: 1 } }).toArray(),
+    req.db.collection("customer_accounts").countDocuments(),
+    req.db.collection("events").aggregate([
+      { $group: { _id: "$status", count: { $sum: 1 }, ticketsSold: { $sum: { $ifNull: ["$sold", 0] } } } },
+    ]).toArray(),
+    req.db.collection("attendees").countDocuments(),
+    req.db.collection("attendees").countDocuments({ checkedIn: true }),
+    req.db.collection("attendees").aggregate([
+      {
+        $project: {
+          source: {
+            $let: {
+              vars: { value: { $trim: { input: { $ifNull: ["$discoverySource", ""] } } } },
+              in: { $cond: [{ $eq: ["$$value", ""] }, "Not provided", "$$value"] },
+            },
+          },
+        },
+      },
+      {
+        $group: {
+          _id: { $toLower: "$source" },
+          label: { $first: "$source" },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { count: -1, label: 1 } },
+      { $project: { _id: 0, label: 1, count: 1 } },
+    ]).toArray(),
+    req.db.collection("ticket_orders").find(
+      { status: "Paid" },
+      { projection: { amountCents: 1, processingFeeCents: 1 } },
+    ).toArray(),
+    getProcessingFeeCents(req.db),
+  ]);
+  const organizersById = new Map(organizers.map((organizer) => [organizer._id.toString(), organizer]));
+  const serializedEvents = events.map((event) => {
+    const organizer = organizersById.get(event.ownerId);
+    return {
+      ...serialize(event),
+      organizerName: organizer?.name || "Unknown organizer",
+      organizerEmail: organizer?.email || "",
+    };
+  });
+  const eventStatuses = Object.fromEntries(eventsByStatus.map(({ _id, count }) => [_id || "Unknown", count]));
+  const totalTicketsSold = eventsByStatus.reduce((total, status) => total + status.ticketsSold, 0);
+  const totalRevenue = paidOrders.reduce((total, order) => {
+    const processingFeeCents = Number.isFinite(order.processingFeeCents)
+      ? order.processingFeeCents
+      : order.amountCents > 0 ? defaultProcessingFeeCents : 0;
+    return total + processingFeeCents;
+  }, 0) / 100;
+
+  res.json({
+    users: [
+      ...customerAccounts.map((account) => ({ ...serialize(account), accountType: "customer" })),
+      ...adminAccounts.map((account) => ({ ...serialize(account), accountType: "admin" })),
+    ].sort((first, second) => new Date(second.createdAt || 0) - new Date(first.createdAt || 0)),
+    events: serializedEvents,
+    analytics: {
+      totalUsers: customerCount,
+      totalEvents: eventsByStatus.reduce((total, status) => total + status.count, 0),
+      activeEvents: eventStatuses["On sale"] || 0,
+      eventStatuses,
+      totalAttendees: attendeeCount,
+      checkedInAttendees: checkedInCount,
+      discoverySources,
+      paidOrders: paidOrders.length,
+      totalTicketsSold,
+      totalRevenue,
+      processingFeeCents,
+    },
+  });
+});
+
+app.get("/workspace/ticket-activity", requireAuth, requireAdmin, async (req, res) => {
+  const { period, date } = req.query;
+  if (!["day", "week", "month"].includes(period) || typeof date !== "string"
+    || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ error: "Choose a valid date and ticket activity period." });
+  }
+
+  const [year, month, day] = date.split("-").map(Number);
+  const selectedDate = new Date(Date.UTC(year, month - 1, day));
+  if (selectedDate.toISOString().slice(0, 10) !== date) {
+    return res.status(400).json({ error: "Choose a valid calendar date." });
+  }
+  const todayParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Manila",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const today = `${todayParts.find((part) => part.type === "year").value}-${todayParts.find((part) => part.type === "month").value}-${todayParts.find((part) => part.type === "day").value}`;
+  if (date > today) {
+    return res.status(400).json({ error: "Choose today or an earlier date." });
+  }
+
+  let startUtc = selectedDate.getTime();
+  let endUtc;
+  if (period === "day") {
+    endUtc = startUtc + 24 * 60 * 60 * 1000;
+  } else if (period === "week") {
+    endUtc = startUtc + 7 * 24 * 60 * 60 * 1000;
+  } else {
+    startUtc = Date.UTC(year, month - 1, 1);
+    endUtc = Date.UTC(year, month, 1);
+  }
+  const start = new Date(startUtc - 8 * 60 * 60 * 1000);
+  const end = new Date(endUtc - 8 * 60 * 60 * 1000);
+  const [ticketActivity, accountCreations] = await Promise.all([
+    req.db.collection("attendees").aggregate([
+      { $match: { createdAt: { $gte: start, $lt: end } } },
+      {
+        $facet: {
+          daily: [
+            {
+              $group: {
+                _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "Asia/Manila" } },
+                count: { $sum: 1 },
+              },
+            },
+          ],
+          hourly: [
+            {
+              $group: {
+                _id: { $dateToString: { format: "%Y-%m-%d-%H", date: "$createdAt", timezone: "Asia/Manila" } },
+                count: { $sum: 1 },
+              },
+            },
+          ],
+          activity: [
+            {
+              $group: {
+                _id: null,
+                totalTicketsSold: { $sum: 1 },
+                totalAttendees: { $sum: 1 },
+                checkedInAttendees: { $sum: { $cond: ["$checkedIn", 1, 0] } },
+              },
+            },
+          ],
+        },
+      },
+      {
+        $project: {
+          daily: { $map: { input: "$daily", as: "bucket", in: { key: "$$bucket._id", count: "$$bucket.count" } } },
+          hourly: { $map: { input: "$hourly", as: "bucket", in: { key: "$$bucket._id", count: "$$bucket.count" } } },
+          activity: { $arrayElemAt: ["$activity", 0] },
+        },
+      },
+    ]).next(),
+    req.db.collection("customer_accounts").aggregate([
+      {
+        $facet: {
+          daily: [
+            { $match: { createdAt: { $gte: start, $lt: end } } },
+            {
+              $group: {
+                _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "Asia/Manila" } },
+                count: { $sum: 1 },
+              },
+            },
+          ],
+          hourly: [
+            { $match: { createdAt: { $gte: start, $lt: end } } },
+            {
+              $group: {
+                _id: { $dateToString: { format: "%Y-%m-%d-%H", date: "$createdAt", timezone: "Asia/Manila" } },
+                count: { $sum: 1 },
+              },
+            },
+          ],
+          activity: [
+            { $match: { createdAt: { $gte: start, $lt: end } } },
+            { $count: "totalAccountsCreated" },
+          ],
+          archivedActivity: [
+            {
+              $match: {
+                $or: [
+                  { disabledAt: { $gte: start, $lt: end } },
+                  { archivedAt: { $gte: start, $lt: end } },
+                ],
+              },
+            },
+            { $count: "totalArchivedAccounts" },
+          ],
+        },
+      },
+      {
+        $project: {
+          daily: { $map: { input: "$daily", as: "bucket", in: { key: "$$bucket._id", count: "$$bucket.count" } } },
+          hourly: { $map: { input: "$hourly", as: "bucket", in: { key: "$$bucket._id", count: "$$bucket.count" } } },
+          totalAccountsCreated: { $ifNull: [{ $arrayElemAt: ["$activity.totalAccountsCreated", 0] }, 0] },
+          totalArchivedAccounts: { $ifNull: [{ $arrayElemAt: ["$archivedActivity.totalArchivedAccounts", 0] }, 0] },
+        },
+      },
+    ]).next(),
+  ]);
+
+  res.json({
+    ticketSales: { daily: ticketActivity?.daily || [], hourly: ticketActivity?.hourly || [] },
+    accountCreations: { daily: accountCreations?.daily || [], hourly: accountCreations?.hourly || [] },
+    totalAccountsCreated: accountCreations?.totalAccountsCreated || 0,
+    totalArchivedAccounts: accountCreations?.totalArchivedAccounts || 0,
+    totalTicketsSold: ticketActivity?.activity?.totalTicketsSold || 0,
+    totalAttendees: ticketActivity?.activity?.totalAttendees || 0,
+    checkedInAttendees: ticketActivity?.activity?.checkedInAttendees || 0,
+  });
+});
+
+app.post("/workspace/analytics-report", requireAuth, requireAdmin, async (req, res) => {
+  if (!groqApiKey) {
+    return res.status(503).json({ error: "AI report generation is unavailable. Configure GROQ_API_KEY on the backend." });
+  }
+
+  const payload = req.body;
+  const isCount = (value) => Number.isSafeInteger(value) && value >= 0;
+  const isChart = (chart) => chart
+    && ["day", "week", "month"].includes(chart.period)
+    && typeof chart.range === "string"
+    && chart.range.length <= 100
+    && Array.isArray(chart.buckets)
+    && chart.buckets.length <= 31
+    && chart.buckets.every((bucket) => bucket
+      && typeof bucket.label === "string"
+      && bucket.label.length <= 60
+      && isCount(bucket.value));
+  if (!payload || !isChart(payload.accountCreations) || !isChart(payload.ticketSales)
+    || !payload.metrics || ![
+      payload.metrics.accountsCreated,
+      payload.metrics.archivedAccounts,
+      payload.metrics.ticketsSold,
+      payload.metrics.checkInRate,
+      payload.metrics.totalUsers,
+      payload.metrics.totalEvents,
+      payload.metrics.totalAttendees,
+    ].every(isCount)
+    || !Number.isFinite(payload.metrics.processingFeeRevenue) || payload.metrics.processingFeeRevenue < 0
+    || !payload.breakdowns
+    || !payload.breakdowns.eventStatuses
+    || !["On sale", "Draft", "Finished", "Cancelled"].every((status) => isCount(payload.breakdowns.eventStatuses[status]))
+    || !Array.isArray(payload.breakdowns.discoverySources)
+    || payload.breakdowns.discoverySources.length > 30
+    || !payload.breakdowns.discoverySources.every((source) => source
+      && typeof source.label === "string"
+      && source.label.length <= 80
+      && isCount(source.count))) {
+    return res.status(400).json({ error: "The analytics report data is invalid." });
+  }
+
+  const reportData = {
+    accountCreations: payload.accountCreations,
+    ticketSales: payload.ticketSales,
+    metrics: payload.metrics,
+    breakdowns: {
+      eventStatuses: Object.fromEntries(
+        ["On sale", "Draft", "Finished", "Cancelled"].map((status) => [status, payload.breakdowns.eventStatuses[status]]),
+      ),
+      discoverySources: payload.breakdowns.discoverySources.map((source, index) => ({
+        label: `Source ${index + 1}`,
+        count: source.count,
+      })),
+    },
+  };
+  let groqResponse;
+  try {
+    groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${groqApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: groqModel,
+        temperature: 0.2,
+        max_tokens: 1100,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: "Write the final summary section of a professional analytics report for a platform administrator. Use only supplied aggregate data. Do not infer causes or trends outside selected periods. Distinguish observed risks from speculation. Return only a JSON object with exactly these keys: executiveSummary (one or two concise sentences), highlights (up to 3 short strings), risks (up to 3 evidence-based strings or a string explaining insufficient data), recommendations (up to 3 practical data-grounded strings). Keep all fields concise.",
+          },
+          {
+            role: "user",
+            content: JSON.stringify(reportData),
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch (error) {
+    console.error("Groq analytics report request failed:", error.message);
+    return res.status(502).json({ error: "The AI report service could not be reached. Please try again." });
+  }
+
+  if (!groqResponse.ok) {
+    let upstreamError;
+    try {
+      upstreamError = await groqResponse.json();
+    } catch {
+      upstreamError = null;
+    }
+    const errorCode = upstreamError?.error?.code;
+    console.error(`Groq analytics report request failed with HTTP ${groqResponse.status}${errorCode ? ` (${errorCode})` : ""}.`);
+    if (errorCode === "model_not_found") {
+      return res.status(503).json({ error: "The configured Groq model is unavailable. Set GROQ_MODEL to a model enabled for your Groq account." });
+    }
+    return res.status(502).json({ error: "The AI report service could not generate a report. Please try again." });
+  }
+
+  let generatedReport;
+  try {
+    const responseData = await groqResponse.json();
+    generatedReport = JSON.parse(responseData.choices?.[0]?.message?.content || "");
+  } catch (error) {
+    console.error("Groq analytics report response was invalid:", error.message);
+    return res.status(502).json({ error: "The AI report service returned an invalid report. Please try again." });
+  }
+
+  const validReportText = (value, maxLength) => typeof value === "string" && value.trim().length > 0 && value.length <= maxLength;
+  if (!generatedReport
+    || !validReportText(generatedReport.executiveSummary, 800)
+    || !Array.isArray(generatedReport.highlights)
+    || generatedReport.highlights.length > 3
+    || !generatedReport.highlights.every((item) => validReportText(item, 240))
+    || !Array.isArray(generatedReport.risks)
+    || generatedReport.risks.length > 3
+    || !generatedReport.risks.every((item) => validReportText(item, 240))
+    || !Array.isArray(generatedReport.recommendations)
+    || generatedReport.recommendations.length > 3
+    || !generatedReport.recommendations.every((item) => validReportText(item, 240))) {
+    console.error("Groq analytics report response did not match the expected report schema.");
+    return res.status(502).json({ error: "The AI report service returned an invalid report. Please try again." });
+  }
+
+  return res.json({
+    executiveSummary: generatedReport.executiveSummary.trim(),
+    highlights: generatedReport.highlights.map((item) => item.trim()),
+    risks: generatedReport.risks.map((item) => item.trim()),
+    recommendations: generatedReport.recommendations.map((item) => item.trim()),
+  });
+});
+
+app.post("/workspace", requireAuth, requireAdmin, async (req, res) => {
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  const accountType = req.body?.role === "admin" ? "admin" : req.body?.role === "organizer" ? "customer" : null;
+  const collectionName = accountType === "admin" ? "admin_accounts" : "customer_accounts";
+  if (!validString(name, 100) || !isValidEmail(email)) {
+    return res.status(400).json({ error: "Enter a name and valid email address." });
+  }
+  if (!accountType) {
+    return res.status(400).json({ error: "Choose either the admin or organizer role." });
+  }
+  if (!emailJsServiceId || !emailJsPublicKey) {
+    return res.status(503).json({ error: "Account invitations are unavailable because email is not configured." });
+  }
+
+  const [existingCustomer, existingAdmin] = await Promise.all([
+    req.db.collection("customer_accounts").findOne({ email }, { projection: { _id: 1 } }),
+    req.db.collection("admin_accounts").findOne({ email }, { projection: { _id: 1 } }),
+  ]);
+  if (existingCustomer || existingAdmin) {
+    return res.status(409).json({ error: "An account with this email already exists." });
+  }
+
+  const temporaryPassword = createTemporaryPassword();
+  const account = {
+    _id: new ObjectId(),
+    name,
+    email,
+    ...await hashPassword(temporaryPassword),
+    mustChangePassword: true,
+    createdAt: new Date(),
+  };
+  try {
+    await req.db.collection(collectionName).insertOne(account);
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ error: "An account with this email already exists." });
+    }
+    throw error;
+  }
+
+  try {
+    const payload = {
+      service_id: emailJsServiceId,
+      template_id: emailJsOrganizerWelcomeTemplateId,
+      user_id: emailJsPublicKey,
+      template_params: {
+        name: account.name,
+        email: account.email,
+        to_email: account.email,
+        temp_pass: temporaryPassword,
+        role: accountType === "admin" ? "Admin" : "Organizer",
+      },
+    };
+    if (emailJsPrivateKey) payload.accessToken = emailJsPrivateKey;
+    const response = await fetch("https://api.emailjs.com/api/v1.0/email/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const providerResponse = await response.text();
+      console.error(`Organizer invitation email failed with HTTP ${response.status}: ${providerResponse.slice(0, 500)}`);
+      await req.db.collection(collectionName).deleteOne({ _id: account._id });
+      return res.status(502).json({ error: "The account was not created because the invitation email could not be sent." });
+    }
+  } catch (error) {
+    console.error("Account invitation email delivery failed:", error);
+    await req.db.collection(collectionName).deleteOne({ _id: account._id });
+    return res.status(502).json({ error: "The account was not created because the invitation email could not be sent." });
+  }
+
+  return res.status(201).json({
+    id: account._id.toString(),
+    name: account.name,
+    email: account.email,
+    createdAt: account.createdAt,
+    accountType,
+    mustChangePassword: true,
+  });
+});
+
+app.patch("/workspace", requireAuth, requireAdmin, async (req, res) => {
+  if (Object.hasOwn(req.body || {}, "processingFeeCents")) {
+    const processingFeeCents = req.body.processingFeeCents;
+    if (!Number.isSafeInteger(processingFeeCents) || processingFeeCents < 0) {
+      return res.status(400).json({ error: "Enter a valid processing fee in cents." });
+    }
+    await req.db.collection("platform_settings").updateOne(
+      { _id: "platform" },
+      { $set: { processingFeeCents, updatedAt: new Date(), updatedBy: req.userId } },
+      { upsert: true },
+    );
+    return res.json({ processingFeeCents });
+  }
+
+  const accountId = objectId(req.body?.accountId);
+  const disabled = req.body?.disabled;
+  const accountType = req.body?.accountType;
+  if (!accountId || typeof disabled !== "boolean" || !["customer", "admin"].includes(accountType)) {
+    return res.status(400).json({ error: "Provide a valid account, role, and disabled state." });
+  }
+
+  const update = disabled
+    ? { $set: { disabledAt: new Date() }, $unset: { archivedAt: "" } }
+    : { $unset: { disabledAt: "", archivedAt: "" } };
+  const collectionName = accountType === "admin" ? "admin_accounts" : "customer_accounts";
+  const account = await req.db.collection(collectionName).findOneAndUpdate(
+    { _id: accountId },
+    update,
+    { returnDocument: "after", projection: { name: 1, email: 1, createdAt: 1, disabledAt: 1, archivedAt: 1 } },
+  );
+  if (!account) {
+    return res.status(404).json({ error: "Account not found." });
+  }
+  return res.json({ ...serialize(account), accountType });
+});
 
 app.get("/api/places/autocomplete", async (req, res) => {
   const query = typeof req.query.q === "string" ? req.query.q.trim() : "";
@@ -1884,26 +2619,30 @@ app.use((error, req, res, next) => {
 });
 
 if (require.main === module) {
-  getDatabase()
-    .then(() => {
-      const port = Number(process.env.PORT) || 5000;
-      app.listen(port, () => console.log(`Gatherly API listening on port ${port}`));
-      const maintenanceTimer = setInterval(() => {
-        Promise.all([
-          releaseExpiredPaymentRegistrations(client.db("Gatherly")),
-          queueMissingRegistrationEmails(client.db("Gatherly"))
-            .then(() => processPendingRegistrationEmails(client.db("Gatherly"))),
-        ]).catch((error) => console.error("Registration maintenance failed:", error));
-      }, 30000);
-      maintenanceTimer.unref();
-      queueMissingRegistrationEmails(client.db("Gatherly"))
-        .then(() => processPendingRegistrationEmails(client.db("Gatherly")))
-        .catch((error) => console.error("Unable to recover pending registration emails:", error));
-    })
-    .catch((error) => {
-      console.error("Unable to connect to the Gatherly database:", error);
-      process.exitCode = 1;
-    });
+  const port = Number(process.env.PORT) || 5000;
+  app.listen(port, () => console.log(`Gatherly API listening on port ${port}`));
+
+  async function runMaintenance() {
+    let database;
+    try {
+      database = await getDatabase();
+    } catch (error) {
+      console.error("Registration maintenance skipped because the database is unavailable:", error);
+      return;
+    }
+
+    await Promise.all([
+      releaseExpiredPaymentRegistrations(database),
+      queueMissingRegistrationEmails(database)
+        .then(() => processPendingRegistrationEmails(database)),
+    ]).catch((error) => console.error("Registration maintenance failed:", error));
+  }
+
+  const maintenanceTimer = setInterval(() => {
+    runMaintenance().catch((error) => console.error("Registration maintenance failed:", error));
+  }, 30000);
+  maintenanceTimer.unref();
+  runMaintenance().catch((error) => console.error("Registration maintenance failed:", error));
 }
 
 module.exports = app;

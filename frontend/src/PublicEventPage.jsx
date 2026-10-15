@@ -1,8 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "./api.js";
 
-const gatherlyProcessingFeeCents = 2500;
-
 function formatPrice(priceCents) {
   return new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(priceCents / 100);
 }
@@ -119,7 +117,7 @@ export default function PublicEventPage({ eventCode }) {
       : [{ id: "free", name: "Free registration", priceCents: 0 }];
   const activeTicketId = ticketTypeId || tickets?.[0]?.id || "";
   const selectedTicket = tickets?.find((ticket) => ticket.id === activeTicketId);
-  const processingFeeCents = selectedTicket?.priceCents > 0 ? gatherlyProcessingFeeCents : 0;
+  const processingFeeCents = selectedTicket?.priceCents > 0 ? event?.processingFeeCents || 0 : 0;
 
   if (loading) {
     return <main className="grid min-h-screen place-items-center bg-[#FAF7F2] text-sm font-semibold text-[#2D3142]">Loading event...</main>;

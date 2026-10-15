@@ -1,7 +1,7 @@
-export async function api(path, options = {}) {
+async function request(url, options) {
   let response;
   try {
-    response = await fetch(`/api${path}`, {
+    response = await fetch(url, {
       ...options,
       credentials: "same-origin",
       headers: {
@@ -33,4 +33,14 @@ export async function api(path, options = {}) {
   }
 
   return data;
+}
+
+export function api(path, options = {}) {
+  return request(`/api${path}`, options);
+}
+
+export function workspaceApi(options = {}) {
+  const { path = "", searchParams, ...requestOptions } = options;
+  const query = searchParams ? `?${new URLSearchParams(searchParams)}` : "";
+  return request(`/workspace${path}${query}`, requestOptions);
 }
