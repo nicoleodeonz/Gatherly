@@ -414,11 +414,22 @@ function createOrganizerManagementTables(section, records) {
   }];
 }
 
-function organizerPdfText(value) {
+function organizerPdfPlainText(value) {
   return escapeExportText(value)
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^\x20-\x7E]/g, "?")
+    .replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ")
+    .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, "-")
+    .replace(/[\u2018\u2019\u201A\u201B\u2032]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F\u2033]/g, "\"")
+    .replace(/\u2026/g, "...")
+    .replace(/[\u2022\u25AA\u25CF]/g, "-")
+    .replace(/\u00D7/g, "x")
+    .replace(/[^\x20-\x7E]/g, "?");
+}
+
+function organizerPdfText(value) {
+  return organizerPdfPlainText(value)
     .replace(/([\\()])/g, "\\$1");
 }
 
@@ -558,11 +569,7 @@ function drawOrganizerPdfBars(commands, { title, items, top, maximumRows = 14 })
 }
 
 function drawOrganizerPdfParagraph(commands, text, x, y, maxCharacters, size = 10) {
-  const words = String(text)
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^\x20-\x7E]/g, "?")
-    .split(/\s+/);
+  const words = organizerPdfPlainText(text).split(/\s+/);
   let line = "";
   let currentY = y;
   words.forEach((word) => {
